@@ -1,0 +1,21 @@
+# Secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Dependencies and build caches
+node_modules/
+.vercel/
+__pycache__/
+.pytest_cache/
+*.log
+.DS_Store
+
+# Per-run output and the local ledger (real prospect data never goes in git)
+runs/*
+!runs/.gitkeep
+data/*
+!data/.gitkeep
+diagnostics/

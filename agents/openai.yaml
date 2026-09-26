@@ -1,0 +1,4 @@
+interface:
+  display_name: "Local Business Revamp"
+  short_description: "Generate fast template websites and run outreach batches"
+  default_prompt: "Use $local-business-revamp to find five dated business websites in an industry and city, collect each business’s details, choose its theme color, run the prepared-template generator, deploy and verify the English preview, and contact them."

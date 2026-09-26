@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 64" width="320" height="64">
+  <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#7CC0F7"/><stop offset="1" stop-color="#3E93E8"/></linearGradient></defs>
+  <rect x="4" y="8" width="48" height="48" rx="13" fill="url(#g)"/>
+  <path transform="translate(4 8)" d="M11 23.5 24 12l13 11.5M14 21.5V37h20V21.5" fill="none" stroke="#fff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+  <path transform="translate(4 8)" d="M25.6 19.5 20 28.5h5l-1.6 8L30 26.5h-5.2z" fill="#F7B500"/>
+  <text x="66" y="36" font-family="Plus Jakarta Sans, Inter, system-ui, sans-serif" font-weight="800" font-size="24" fill="#0F172A" letter-spacing="-0.5">Your Company</text>
+  <text x="66" y="52" font-family="JetBrains Mono, ui-monospace, monospace" font-size="9" fill="#5B6577" letter-spacing="2.4">LICENSED ELECTRICIAN</text>
+</svg>

@@ -1,0 +1,79 @@
+[
+  {
+    "file": "hero.jpg",
+    "source": "https://unsplash.com/photos/i6SOaGYmNOA",
+    "image": "https://images.unsplash.com/photo-1768486143865-342d8cc12c90?auto=format&fit=crop&w=1800&q=85",
+    "license": "https://unsplash.com/license",
+    "use": "Illustrative stock photograph"
+  },
+  {
+    "file": "interior.jpg",
+    "source": "https://unsplash.com/photos/Ed51pysYrg0",
+    "image": "https://images.unsplash.com/photo-1774578341925-cd64c07195e9?auto=format&fit=crop&w=1800&q=85",
+    "license": "https://unsplash.com/license",
+    "use": "Illustrative stock photograph"
+  },
+  {
+    "file": "electrician.jpg",
+    "source": "build-premium-website/reference/full-reference-app.jsx",
+    "image": "https://images.unsplash.com/photo-1621905252507-b35492cc74b4?auto=format&fit=crop&w=1800&q=85",
+    "license": "https://unsplash.com/license",
+    "use": "Illustrative stock photograph"
+  },
+  {
+    "file": "panel-testing.jpg",
+    "source": "https://unsplash.com/photos/PkHf7BUWbtk",
+    "image": "https://images.unsplash.com/photo-1758101755915-462eddc23f57?ixlib=rb-4.1.0&q=85&fm=jpg&crop=entropy&cs=srgb&dl=toolmash-expo-PkHf7BUWbtk-unsplash.jpg&w=1400",
+    "license": "https://unsplash.com/license",
+    "use": "Illustrative stock photograph",
+    "alt": "Electrician testing an electrical panel \u2014 stock photograph"
+  },
+  {
+    "file": "pendant.jpg",
+    "source": "https://unsplash.com/photos/SzZwx-z6tE0",
+    "image": "https://images.unsplash.com/photo-1520701005404-6761368ce427?ixlib=rb-4.1.0&q=85&fm=jpg&crop=entropy&cs=srgb&dl=pierre-chatel-innocenti-SzZwx-z6tE0-unsplash.jpg&w=1400",
+    "license": "https://unsplash.com/license",
+    "use": "Illustrative stock photograph",
+    "alt": "Minimal white pendant light \u2014 stock photograph"
+  },
+  {
+    "file": "cafe-lighting.jpg",
+    "source": "https://unsplash.com/photos/eQwkfNmrVaY",
+    "image": "https://images.unsplash.com/photo-1508827939935-d2543f69c4c4?ixlib=rb-4.1.0&q=85&fm=jpg&crop=entropy&cs=srgb&dl=muhammad-haikal-sjukri-eQwkfNmrVaY-unsplash.jpg&w=1400",
+    "license": "https://unsplash.com/license",
+    "use": "Illustrative stock photograph",
+    "alt": "Glass pendant lighting \u2014 stock photograph"
+  },
+  {
+    "file": "lamp-detail.jpg",
+    "source": "https://unsplash.com/photos/CJutkMbDol8",
+    "image": "https://images.unsplash.com/photo-1754634266990-f86e4ee91ea0?ixlib=rb-4.1.0&q=85&fm=jpg&crop=entropy&cs=srgb&dl=objecttype-raw-CJutkMbDol8-unsplash.jpg&w=1400",
+    "license": "https://unsplash.com/license",
+    "use": "Illustrative stock photograph",
+    "alt": "Sculptural pendant lamp detail \u2014 stock photograph"
+  },
+  {
+    "file": "ev-charging.jpg",
+    "source": "https://unsplash.com/photos/AbXfLJyOoYQ",
+    "image": "https://images.unsplash.com/photo-1747992422276-ab5785d6ad18?ixlib=rb-4.1.0&q=85&fm=jpg&crop=entropy&cs=srgb&dl=go-e-AbXfLJyOoYQ-unsplash.jpg&w=1400",
+    "license": "https://unsplash.com/license",
+    "use": "Illustrative stock photograph",
+    "alt": "Electric vehicle charging cable \u2014 stock photograph"
+  },
+  {
+    "file": "house-dusk.jpg",
+    "source": "https://unsplash.com/photos/Ywyr5vjnExA",
+    "image": "https://images.unsplash.com/photo-1776222075410-5acc108845c8?ixlib=rb-4.1.0&q=85&fm=jpg&crop=entropy&cs=srgb&dl=james-coleman-Ywyr5vjnExA-unsplash.jpg&w=1400",
+    "license": "https://unsplash.com/license",
+    "use": "Illustrative stock photograph",
+    "alt": "Residential lighting at dusk \u2014 stock photograph"
+  },
+  {
+    "file": "outdoor-lighting.jpg",
+    "source": "https://unsplash.com/photos/7oAneWHzwwE",
+    "image": "https://images.unsplash.com/photo-1762180075273-0527bdc7fa85?ixlib=rb-4.1.0&q=85&fm=jpg&crop=entropy&cs=srgb&dl=si-nguyen-7oAneWHzwwE-unsplash.jpg&w=1400",
+    "license": "https://unsplash.com/license",
+    "use": "Illustrative stock photograph",
+    "alt": "Contemporary home with outdoor lighting \u2014 stock photograph"
+  }
+]
