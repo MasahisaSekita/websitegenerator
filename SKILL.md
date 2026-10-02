@@ -22,6 +22,14 @@ The application runs natively on Windows; WSL is not required. Work in PowerShel
 - The Python tools switch themselves to UTF-8 mode on Windows; no extra setup is needed.
 - Template edits (`quick_site.py prepare`) need Node/npm on PATH. The prerender script needs `CHROME_PATH` set to Chrome's location, e.g. `C:\Program Files\Google\Chrome\Application\chrome.exe`.
 
+## Google Sheets ledger (Apps Script edition)
+
+`apps-script/` holds a Google Apps Script version of the ledger and dashboard ([setup](apps-script/README.md)). It is active only when `.env` (or the environment) sets both `REVAMP_SHEETS_URL` and `REVAMP_SHEETS_TOKEN`. When active:
+
+- Run every ledger command in this skill and its references with `tools/sheets_ledger.py` in place of `tools/control.py`, keeping the same subcommand and arguments, e.g. `python3 tools/sheets_ledger.py claim --batch BATCH_ID --worker WORKER_ID`. The stage, deduplication, capacity, evidence and single-submission rules are identical.
+- The dashboard is the Apps Script web app URL; do not start `control.py serve`. Never mix the two ledgers within one run.
+- If a write command reports that the web app could not be reached, run `state` to see whether it was applied before repeating it. After an unconfirmed `contact-begin`, submit the form only once `state` shows the job in `contacting`.
+
 ## AI owns the complete run
 
 When Albert runs this skill with an industry and city, carry each qualified prospect through **research → choose template and color → run generator → verify → deploy → verify public URL → submit outreach → record result**. The AI does this work; do not ask Albert to enter a business name, phone, email, address or theme color, fill out a dashboard form, run a command, deploy a site, or manually send the prepared message. For a real batch, submit outreach when the original form is usable; otherwise the required final step is a verified website and manual outreach handoff under [Manual outreach](references/manual-outreach.md); honor only an explicit dry-run or narrower scope. If the active computer-use environment imposes a non-overridable confirmation at the final form action, request it then and only then.

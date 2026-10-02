@@ -5,6 +5,9 @@
 *.pem
 *.key
 
+# Personal clasp link for the Apps Script edition (copy apps-script/.clasp.json.example)
+apps-script/.clasp.json
+
 # Dependencies and build caches
 node_modules/
 .vercel/

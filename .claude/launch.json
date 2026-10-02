@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "apps-script-dashboard",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["apps-script/dev/server.mjs", "--demo", "--port", "8787"],
+      "port": 8787
+    }
+  ]
+}

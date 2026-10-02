@@ -1,0 +1,1113 @@
+<script>
+(function () {
+  'use strict';
+
+  // ---------------------------------------------------------------------------
+  // Helpers
+
+  const $ = (selector, root) => (root || document).querySelector(selector);
+  const $$ = (selector, root) => Array.from((root || document).querySelectorAll(selector));
+  const ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+  const esc = value => String(value === null || value === undefined ? '' : value).replace(/[&<>"']/g, character => ESCAPES[character]);
+  const icon = (name, extra) => `<svg class="icon${extra ? ' ' + extra : ''}" aria-hidden="true"><use href="#i-${name}"></use></svg>`;
+  const plural = (count, word, many) => `${count} ${count === 1 ? word : many || word + 's'}`;
+  const sum = (list, pick) => list.reduce((total, item) => total + (Number(pick(item)) || 0), 0);
+  const storage = {
+    get(key) { try { return window.localStorage.getItem(key); } catch (error) { return null; } },
+    set(key, value) { try { if (value === null) window.localStorage.removeItem(key); else window.localStorage.setItem(key, value); } catch (error) { /* private mode */ } },
+  };
+
+  function safeUrl(value) {
+    if (typeof value !== 'string' || !value) return null;
+    try {
+      const url = new URL(value);
+      return url.protocol === 'https:' || url.protocol === 'http:' ? url.href : null;
+    } catch (error) {
+      return null;
+    }
+  }
+  function hostOf(value) {
+    const url = safeUrl(value);
+    return url ? new URL(url).hostname.replace(/^www\./, '') : '';
+  }
+  function shortUrl(value) {
+    const url = safeUrl(value);
+    if (!url) return String(value || '');
+    const parsed = new URL(url);
+    return parsed.hostname.replace(/^www\./, '') + (parsed.pathname === '/' ? '' : parsed.pathname);
+  }
+
+  let clockSkew = 0;
+  const now = () => Date.now() + clockSkew;
+  function ago(iso) {
+    const time = Date.parse(iso);
+    if (!Number.isFinite(time)) return '—';
+    const seconds = Math.max(0, Math.round((now() - time) / 1000));
+    if (seconds < 45) return 'just now';
+    const minutes = Math.round(seconds / 60);
+    if (minutes < 60) return `${minutes}m ago`;
+    const hours = Math.round(minutes / 60);
+    if (hours < 24) return `${hours}h ago`;
+    const days = Math.round(hours / 24);
+    if (days < 7) return `${days}d ago`;
+    return new Date(time).toLocaleDateString([], { month: 'short', day: 'numeric' });
+  }
+  function stamp(iso) {
+    const time = Date.parse(iso);
+    return Number.isFinite(time) ? new Date(time).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : 'Unknown time';
+  }
+  function shortDate(iso) {
+    const time = Date.parse(iso);
+    return Number.isFinite(time) ? new Date(time).toLocaleDateString([], { month: 'short', day: 'numeric' }) : '';
+  }
+
+  function server(name) {
+    const args = Array.prototype.slice.call(arguments, 1);
+    return new Promise((resolve, reject) => {
+      if (!window.google || !google.script || !google.script.run) {
+        reject(new Error('This page has to be opened from its Apps Script web app URL.'));
+        return;
+      }
+      const runner = google.script.run.withSuccessHandler(resolve).withFailureHandler(reject);
+      runner[name].apply(runner, args);
+    });
+  }
+  const isAccessError = error => /ACCESS_DENIED/.test(String(error && error.message || error));
+  const errorText = error => String(error && error.message || error || 'Something went wrong').replace(/^(Exception|Error|LedgerError):\s*/, '').replace(/^ACCESS_DENIED:\s*/, '');
+
+  function copyText(text) {
+    if (navigator.clipboard && window.isSecureContext) {
+      return navigator.clipboard.writeText(text).then(() => true, () => legacyCopy(text));
+    }
+    return Promise.resolve(legacyCopy(text));
+  }
+  function legacyCopy(text) {
+    const area = document.createElement('textarea');
+    area.value = text;
+    area.setAttribute('readonly', '');
+    area.style.cssText = 'position:fixed;top:0;left:0;opacity:0;pointer-events:none';
+    (document.querySelector('dialog[open]') || document.body).appendChild(area);
+    area.select();
+    let copied = false;
+    try { copied = document.execCommand('copy'); } catch (error) { copied = false; }
+    area.remove();
+    return copied;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Pipeline model
+
+  const STAGE_LABELS = {
+    queued: 'Queued', reviewing: 'Reviewing', extracting: 'Collecting details', building: 'Building', checking: 'Checking',
+    deploying: 'Deploying', ready: 'Preview live', contacting: 'Contacting', complete: 'Sent', sent: 'Sent',
+    uncertain: 'Uncertain', blocked: 'Blocked', skipped: 'Skipped', manual: 'Manual outreach',
+  };
+  const STEPS = [
+    { label: 'Queued', stages: ['queued'] },
+    { label: 'Qualify', stages: ['reviewing', 'extracting'] },
+    { label: 'Build', stages: ['building'] },
+    { label: 'QA', stages: ['checking'] },
+    { label: 'Deploy', stages: ['deploying'] },
+    { label: 'Live', stages: ['ready'] },
+    { label: 'Outreach', stages: ['contacting', 'complete', 'sent', 'manual'] },
+  ];
+  const CATEGORIES = [
+    { key: 'all', label: 'All' },
+    { key: 'working', label: 'In progress' },
+    { key: 'live', label: 'Preview live' },
+    { key: 'manual', label: 'Manual' },
+    { key: 'sent', label: 'Sent' },
+    { key: 'attention', label: 'Needs attention' },
+    { key: 'skipped', label: 'Skipped' },
+  ];
+  const CATEGORY_ORDER = ['working', 'live', 'manual', 'attention', 'sent', 'skipped'];
+  const BATCH_TONES = { queued: 'neutral', running: 'working', complete: 'sent', exhausted: 'manual', blocked: 'attention', cancelled: 'skipped' };
+  const CONTACT_LABELS = {
+    not_sent: 'Not sent yet', attempting: 'Submission in progress', submitted: 'Submitted through the contact form', sent: 'Sent',
+    uncertain: 'Uncertain — never retried', blocked: 'Blocked before submitting', manual_required: 'Manual outreach needed',
+  };
+  const label = value => String(value || '').replace(/[_-]+/g, ' ').replace(/^./, character => character.toUpperCase());
+
+  const dataOf = job => (job && job.data && typeof job.data === 'object' ? job.data : {});
+  const isManual = job => job.stage === 'manual' || job.contact_status === 'manual_required';
+  const manualInfo = job => (dataOf(job).manual_outreach && typeof dataOf(job).manual_outreach === 'object' ? dataOf(job).manual_outreach : {});
+  const manualSent = job => Boolean(manualInfo(job).sent_at);
+  function category(job) {
+    if (isManual(job)) return 'manual';
+    if (['blocked', 'uncertain', 'failed', 'error', 'needs_attention'].includes(job.stage)) return 'attention';
+    if (['skipped', 'rejected'].includes(job.stage)) return 'skipped';
+    if (['complete', 'sent', 'completed', 'contacted'].includes(job.stage) || ['submitted', 'sent'].includes(job.contact_status)) return 'sent';
+    if (job.stage === 'ready') return 'live';
+    return 'working';
+  }
+  const toneOf = job => (category(job) === 'manual' && manualSent(job) ? 'sent' : category(job));
+  function stageLabel(job) {
+    if (job.stage === 'manual') return manualSent(job) ? 'Manual · sent' : 'Manual · to send';
+    return STAGE_LABELS[job.stage] || label(job.stage) || 'Queued';
+  }
+  function stepIndex(job) {
+    const index = STEPS.findIndex(step => step.stages.includes(job.stage));
+    if (index >= 0) return index;
+    const facts = dataOf(job);
+    if (['uncertain', 'attempting', 'blocked'].includes(job.contact_status)) return 6;
+    if (safeUrl(job.preview_url)) return 5;
+    if (facts.qa_passed === true) return 4;
+    if (facts.workspace) return 2;
+    return 1;
+  }
+  function stepStates(job) {
+    const cat = category(job), index = stepIndex(job);
+    const stopped = cat === 'attention' || cat === 'skipped';
+    const finished = cat === 'sent' || (cat === 'manual' && manualSent(job));
+    if (job.stage === 'queued') return STEPS.map((step, i) => (i === 0 ? 'wait' : 'todo'));
+    return STEPS.map((step, i) => (i < index ? 'done' : i > index ? 'todo' : finished ? 'done' : stopped ? 'stop' : 'now'));
+  }
+
+  // ---------------------------------------------------------------------------
+  // State
+
+  let data = null;
+  let revision = null;
+  let accessKey = storage.get('wg.key') || '';
+  let locked = false;
+  let pollTimer = null;
+  let pollInFlight = false;
+  let lastFullFetch = 0;
+  let failures = 0;
+  const activity = {};
+  const ui = {
+    batch: 'all',
+    filter: 'all',
+    search: '',
+    sort: storage.get('wg.sort') || 'recent',
+    view: storage.get('wg.view') === 'table' ? 'table' : 'grid',
+    job: null,
+  };
+  const narrow = window.matchMedia('(max-width: 760px)');
+
+  const jobsById = () => new Map((data ? data.jobs : []).map(job => [job.id, job]));
+  const batchById = id => (data ? data.batches.find(batch => batch.id === id) : null) || null;
+  const scopeBatches = () => (data ? (ui.batch === 'all' ? data.batches : data.batches.filter(batch => batch.id === ui.batch)) : []);
+  const scopeJobs = () => (data ? (ui.batch === 'all' ? data.jobs : data.jobs.filter(job => job.batch_id === ui.batch)) : []);
+  const batchName = batch => (batch ? `${batch.industry} · ${batch.city}` : '');
+  const runPrompt = batch => `Use $local-business-revamp to run the queued dashboard batch ${batch.id}: ${batch.requested_count} completed websites for ${batch.industry} in ${batch.city}.`;
+
+  function matchesSearch(job) {
+    if (!ui.search) return true;
+    const haystack = [job.name, job.domain, job.url, job.detail, job.reason, job.worker].join(' ').toLowerCase();
+    return ui.search.split(/\s+/).every(term => haystack.includes(term));
+  }
+  function sortJobs(list) {
+    const updated = job => Date.parse(job.updated_at) || 0;
+    const copy = list.slice();
+    if (ui.sort === 'name') return copy.sort((a, b) => String(a.name).localeCompare(String(b.name)));
+    if (ui.sort === 'oldest') return copy;
+    if (ui.sort === 'stage') return copy.sort((a, b) => CATEGORY_ORDER.indexOf(category(a)) - CATEGORY_ORDER.indexOf(category(b)) || stepIndex(b) - stepIndex(a) || updated(b) - updated(a));
+    return copy.sort((a, b) => updated(b) - updated(a));
+  }
+
+  // Replaces a region's markup only when it changed, keeping keyboard focus in place.
+  function patch(element, html) {
+    if (!element || element.__html === html) return;
+    const active = document.activeElement;
+    const key = active && element.contains(active) ? active.getAttribute('data-key') : null;
+    element.innerHTML = html;
+    element.__html = html;
+    if (key) {
+      const again = $$('[data-key]', element).find(item => item.getAttribute('data-key') === key);
+      if (again) again.focus({ preventScroll: true });
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Pieces
+
+  function hue(text) {
+    let value = 7;
+    for (const character of String(text || '')) value = (value * 31 + character.codePointAt(0)) % 360;
+    return value;
+  }
+  function initials(name) {
+    const words = String(name || '?').replace(/[^\p{L}\p{N}\s]/gu, ' ').trim().split(/\s+/).filter(Boolean);
+    const first = words[0] ? Array.from(words[0])[0] : '?';
+    const second = words[1] ? Array.from(words[1])[0] : '';
+    return (first + second).toUpperCase();
+  }
+  const avatar = (name, size) => `<span class="avatar${size ? ' avatar-' + size : ''}" style="--hue:${hue(name)}" aria-hidden="true">${esc(initials(name))}</span>`;
+  const chip = job => {
+    const cat = category(job);
+    return `<span class="chip${cat === 'working' && job.stage !== 'queued' ? ' is-moving' : ''}" data-tone="${cat === 'working' && job.stage === 'queued' ? 'neutral' : toneOf(job)}"><span class="chip-dot"></span>${esc(stageLabel(job))}</span>`;
+  };
+  const batchChip = batch => `<span class="chip chip-sm${batch.status === 'running' ? ' is-moving' : ''}" data-tone="${BATCH_TONES[batch.status] || 'neutral'}"><span class="chip-dot"></span>${esc(label(batch.status))}</span>`;
+  function track(job) {
+    const states = stepStates(job);
+    const at = states.findIndex(state => state === 'now' || state === 'stop' || state === 'wait');
+    const description = at >= 0 ? `${states[at] === 'stop' ? 'Stopped at' : states[at] === 'wait' ? 'Waiting at' : 'At'} ${STEPS[at].label}, step ${at + 1} of ${STEPS.length}` : 'All steps done';
+    const moving = category(job) === 'working' && job.stage !== 'queued';
+    return `<div class="track${moving ? ' is-moving' : ''}" data-tone="${toneOf(job)}" role="img" aria-label="${esc(description)}">${states.map(state => `<i class="${state === 'todo' ? '' : state}"></i>`).join('')}</div>`;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Rendering
+
+  function render() {
+    if (!data) return;
+    if (ui.batch !== 'all' && !batchById(ui.batch)) ui.batch = 'all';
+    renderScope();
+    renderNotice();
+    renderKpis();
+    renderJobs();
+    renderBatches();
+    renderWorkers();
+    renderActivity();
+    renderControls();
+    if ($('#drawer').open) renderDrawer();
+  }
+
+  function renderScope() {
+    const batch = batchById(ui.batch);
+    const jobs = scopeJobs();
+    if (!batch) {
+      patch($('#scope-title'), 'Overview');
+      const active = data.batches.filter(item => ['queued', 'running'].includes(item.status)).length;
+      $('#scope-sub').textContent = data.batches.length
+        ? `${plural(data.batches.length, 'batch', 'batches')} · ${plural(jobs.length, 'business', 'businesses')}${active ? ` · ${active} active` : ''}`
+        : 'Queue a batch to get started';
+      patch($('#scope-actions'), '');
+      return;
+    }
+    patch($('#scope-title'), `${esc(batch.industry)} ${batchChip(batch)}`);
+    $('#scope-sub').textContent = `${batch.city} · queued ${shortDate(batch.created_at)} · ${batch.completed_count} of ${batch.requested_count} sent`;
+    const actions = [];
+    if (['queued', 'running'].includes(batch.status)) actions.push(`<button type="button" class="btn btn-secondary btn-sm" data-copy-prompt="${esc(batch.id)}" data-key="scope-prompt">${icon('terminal')}Copy run prompt</button>`);
+    if (['queued', 'running', 'blocked'].includes(batch.status)) actions.push(`<button type="button" class="btn btn-ghost btn-sm" data-cancel-batch="${esc(batch.id)}" data-key="scope-cancel">Cancel batch</button>`);
+    actions.push(`<button type="button" class="btn btn-ghost btn-sm" data-set-batch="all" data-key="scope-all">${icon('x')}All batches</button>`);
+    patch($('#scope-actions'), actions.join(''));
+  }
+
+  function renderNotice() {
+    const waiting = scopeBatches().filter(batch => batch.status === 'queued').sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at));
+    const notice = $('#notice');
+    if (!waiting.length) {
+      notice.hidden = true;
+      patch(notice, '');
+      return;
+    }
+    notice.hidden = false;
+    notice.setAttribute('data-tone', 'working');
+    const chips = waiting.slice(0, 3).map(batch => `<button type="button" class="pill" data-copy-prompt="${esc(batch.id)}" data-key="notice-${esc(batch.id)}" title="Copy the Codex prompt for this batch"><span>${esc(batchName(batch))}</span>${icon('copy')}</button>`).join('');
+    patch(notice, `<span class="notice-icon">${icon('clock')}</span><div class="notice-body"><b>${plural(waiting.length, 'batch', 'batches')} waiting for the coordinator.</b><p>Nothing runs until you ask Codex. Copy a run prompt and paste it into Codex.</p></div><div class="notice-actions">${chips}</div>`);
+  }
+
+  function renderKpis() {
+    const jobs = scopeJobs();
+    const counts = {};
+    jobs.forEach(job => { const cat = category(job); counts[cat] = (counts[cat] || 0) + 1; });
+    const targets = scopeBatches().filter(batch => batch.status !== 'cancelled');
+    const target = sum(targets, batch => batch.requested_count);
+    const done = sum(targets, batch => Math.min(batch.completed_count, batch.requested_count));
+    const share = target ? Math.round((done / target) * 100) : 0;
+    const queued = jobs.filter(job => job.stage === 'queued').length;
+    const hosted = jobs.filter(job => safeUrl(job.preview_url)).length;
+    const manualOpen = jobs.filter(job => job.stage === 'manual' && !manualSent(job)).length;
+    const manualDone = jobs.filter(job => job.stage === 'manual' && manualSent(job)).length;
+    const tiles = [
+      { key: 'sent', icon: 'send', label: 'Outreach sent', value: counts.sent || 0, unit: ui.batch !== 'all' && target ? `/ ${target}` : '', sub: target ? `${share}% of the ${target}-site target` : 'No active target', progress: target ? Math.min(100, (done / target) * 100) : null },
+      { key: 'working', icon: 'pulse', label: 'In progress', value: (counts.working || 0) - queued, sub: queued ? `${queued} queued` : 'Nothing queued' },
+      { key: 'live', icon: 'globe', label: 'Preview live', value: counts.live || 0, sub: `${plural(hosted, 'site')} hosted so far` },
+      { key: 'manual', icon: 'hand', label: 'Manual to send', value: manualOpen, sub: manualDone ? `${manualDone} marked sent` : 'Ready-to-copy messages' },
+      { key: 'attention', icon: 'alert', label: 'Needs attention', value: counts.attention || 0, sub: `${counts.skipped || 0} skipped` },
+    ];
+    patch($('#kpis'), tiles.map(tile => `
+      <button type="button" class="kpi" data-tone="${tile.key}" data-filter="${tile.key}" aria-pressed="${ui.filter === tile.key}" data-key="kpi-${tile.key}">
+        <span class="kpi-label"><span class="kpi-icon">${icon(tile.icon)}</span>${esc(tile.label)}</span>
+        <span class="kpi-value">${tile.value}${tile.unit ? `<small>${esc(tile.unit)}</small>` : ''}</span>
+        ${tile.progress !== undefined && tile.progress !== null ? `<span class="progress" aria-hidden="true"><span style="width:${tile.progress.toFixed(1)}%"></span></span>` : ''}
+        <span class="kpi-sub">${esc(tile.sub)}</span>
+      </button>`).join(''));
+  }
+
+  function renderJobs() {
+    const scoped = scopeJobs();
+    const searched = scoped.filter(matchesSearch);
+    const counts = { all: searched.length };
+    searched.forEach(job => { const cat = category(job); counts[cat] = (counts[cat] || 0) + 1; });
+    patch($('#filters'), CATEGORIES.map(item => `
+      <button type="button" class="filter${ui.filter === item.key ? ' is-active' : ''}" data-filter="${item.key}" aria-pressed="${ui.filter === item.key}" data-key="filter-${item.key}"${item.key === 'all' ? '' : ` data-tone="${item.key}"`}>
+        ${item.key === 'all' ? '' : '<span class="filter-dot"></span>'}${esc(item.label)}<span class="filter-count">${counts[item.key] || 0}</span>
+      </button>`).join(''));
+    const shown = sortJobs(searched.filter(job => ui.filter === 'all' || category(job) === ui.filter));
+    $('#jobs-count').textContent = shown.length;
+
+    let html;
+    if (!data.batches.length) html = onboarding();
+    else if (!scoped.length) {
+      html = `<div class="empty"><span class="empty-icon">${icon('clock')}</span><h3>No businesses yet</h3><p>Businesses appear here as the coordinator discovers and qualifies them. A queued batch starts when you ask Codex to run it.</p></div>`;
+    } else if (!shown.length) {
+      html = `<div class="empty"><span class="empty-icon">${icon('search')}</span><h3>No businesses match</h3><p>Nothing in this view matches your filter${ui.search ? ' and search' : ''}.</p><button type="button" class="btn btn-secondary btn-sm" data-clear-filters data-key="clear-filters">Clear filters</button></div>`;
+    } else if (ui.view === 'table' && !narrow.matches) html = jobTable(shown);
+    else html = `<div class="job-grid">${shown.map(jobCard).join('')}</div>`;
+    patch($('#jobs'), html);
+  }
+
+  function onboarding() {
+    return `<div class="empty empty-hero">
+      <span class="brand-mark" aria-hidden="true">${icon('bolt', 'icon-fill')}</span>
+      <h3>Start your first batch</h3>
+      <p>Choose an industry and a place. The Codex coordinator finds local businesses whose websites look dated, builds each one a fresh preview and sends your outreach. Progress shows up here as it happens.</p>
+      <ol class="how">
+        <li><b>Queue a batch</b><span>Industry, city or state, and how many websites you want.</span></li>
+        <li><b>Ask Codex to run it</b><span>Paste the run prompt the dashboard gives you.</span></li>
+        <li><b>Follow along</b><span>Live previews, sent outreach and manual follow-ups.</span></li>
+      </ol>
+      <button type="button" class="btn btn-primary" data-new-batch data-key="onboarding-new">${icon('plus')}New batch</button>
+    </div>`;
+  }
+
+  function jobCard(job) {
+    const preview = safeUrl(job.preview_url);
+    const route = dataOf(job).outreach_mode === 'manual' && job.stage !== 'manual' && category(job) === 'working' ? '<span class="tag tag-manual">Manual route</span>' : '';
+    return `<article class="job-card">
+      <div class="job-top">
+        ${avatar(job.name)}
+        <div class="job-titles">
+          <h3><button type="button" class="job-open" data-open-job="${esc(job.id)}" data-key="job-${esc(job.id)}">${esc(job.name || 'Unnamed business')}</button></h3>
+          <span class="job-domain">${esc(job.domain || hostOf(job.url) || 'Website pending')}</span>
+        </div>
+      </div>
+      <div class="job-status">${chip(job)}${route}</div>
+      ${track(job)}
+      <p class="job-detail">${esc(job.detail || job.reason || 'Waiting for the coordinator.')}</p>
+      <div class="job-foot">
+        <span class="job-time" title="${esc(stamp(job.updated_at))}">${icon('clock')}${esc(ago(job.updated_at))}</span>
+        ${preview ? `<a class="job-link" href="${esc(preview)}" target="_blank" rel="noopener noreferrer">Preview ${icon('external')}</a>` : ''}
+      </div>
+    </article>`;
+  }
+
+  function jobTable(jobs) {
+    const rows = jobs.map(job => {
+      const preview = safeUrl(job.preview_url);
+      const batch = batchById(job.batch_id);
+      return `<tr data-row-job="${esc(job.id)}">
+        <td><div class="cell-biz">${avatar(job.name, 'sm')}<div><button type="button" class="job-open" data-open-job="${esc(job.id)}" data-key="row-${esc(job.id)}">${esc(job.name || 'Unnamed business')}</button><span class="job-domain">${esc(job.domain || hostOf(job.url))}</span></div></div></td>
+        <td>${chip(job)}</td>
+        <td>${track(job)}</td>
+        <td class="cell-muted">${esc(batch ? batch.city : '')}</td>
+        <td><span class="cell-detail">${esc(job.detail || job.reason || '—')}</span></td>
+        <td class="cell-muted" title="${esc(stamp(job.updated_at))}">${esc(ago(job.updated_at))}</td>
+        <td>${preview ? `<a class="icon-btn icon-btn-sm" href="${esc(preview)}" target="_blank" rel="noopener noreferrer" aria-label="Open the preview of ${esc(job.name)}" title="Open preview">${icon('external')}</a>` : ''}</td>
+      </tr>`;
+    }).join('');
+    return `<div class="table-wrap"><table class="job-table">
+      <thead><tr><th scope="col">Business</th><th scope="col">Status</th><th scope="col">Progress</th><th scope="col">Location</th><th scope="col">Latest update</th><th scope="col">Updated</th><th scope="col"><span class="sr-only">Preview</span></th></tr></thead>
+      <tbody>${rows}</tbody></table></div>`;
+  }
+
+  function renderBatches() {
+    const batches = data.batches.slice().sort((a, b) => (Date.parse(b.created_at) || 0) - (Date.parse(a.created_at) || 0));
+    $('#batches-note').textContent = batches.length ? plural(batches.length, 'batch', 'batches') : '';
+    if (!batches.length) {
+      patch($('#batches'), `<p class="side-empty">No batches yet. <button type="button" class="link-btn" data-new-batch data-key="batches-new">Queue your first one</button>.</p>`);
+      return;
+    }
+    const totalSent = sum(data.batches, batch => batch.completed_count);
+    const rows = [`<button type="button" class="batch-row batch-all${ui.batch === 'all' ? ' is-active' : ''}" data-set-batch="all" aria-pressed="${ui.batch === 'all'}" data-key="batch-all"><span class="batch-name">All batches</span><span class="batch-stats"><b>${totalSent}</b> sent · ${data.jobs.length} businesses</span></button>`];
+    batches.forEach(batch => {
+      const share = batch.requested_count ? Math.min(100, (batch.completed_count / batch.requested_count) * 100) : 0;
+      const extras = [batch.active_count ? `${batch.active_count} active` : '', batch.manual_count ? `${batch.manual_count} manual` : ''].filter(Boolean).join(' · ');
+      rows.push(`<button type="button" class="batch-row${ui.batch === batch.id ? ' is-active' : ''}" data-set-batch="${esc(batch.id)}" aria-pressed="${ui.batch === batch.id}" data-key="batch-${esc(batch.id)}">
+        <span class="batch-line"><span class="batch-name">${esc(batch.industry)}</span>${batchChip(batch)}</span>
+        <span class="batch-place">${esc(batch.city)} · ${esc(shortDate(batch.created_at))}</span>
+        <span class="progress" aria-hidden="true"><span style="width:${share.toFixed(1)}%"></span></span>
+        <span class="batch-stats"><b>${batch.completed_count}</b>/${batch.requested_count} sent${extras ? ' · ' + esc(extras) : ''}</span>
+      </button>`);
+    });
+    patch($('#batches'), rows.join(''));
+  }
+
+  function renderWorkers() {
+    const max = Math.max(1, Number(data.settings && data.settings.max_workers) || 3);
+    const running = data.workers.filter(worker => worker.status === 'running' && worker.job_id);
+    const jobs = jobsById();
+    const slots = Math.max(max, running.length);
+    const items = [];
+    for (let index = 0; index < slots; index++) {
+      const worker = running[index];
+      const slot = String(index + 1).padStart(2, '0');
+      if (!worker) {
+        items.push(`<li class="worker is-idle"><div class="worker-row"><span class="worker-slot">${slot}</span><span class="worker-main"><span class="worker-job">Available</span></span></div></li>`);
+        continue;
+      }
+      const job = jobs.get(worker.job_id);
+      const age = now() - Date.parse(worker.updated_at);
+      const stale = Number.isFinite(age) && age > 120000;
+      const minutes = Math.max(1, Math.floor(age / 60000));
+      items.push(`<li class="worker is-busy${stale ? ' is-stale' : ''}">
+        <button type="button" class="worker-row" data-open-job="${esc(worker.job_id)}" data-key="worker-${esc(worker.id)}">
+          <span class="worker-slot">${slot}</span>
+          <span class="worker-main"><span class="worker-job">${esc(job ? job.name : worker.job_id)}</span><span class="worker-meta">${esc(job ? stageLabel(job) : 'Working')} · ${esc(worker.id)}</span></span>
+          <span class="worker-age" title="Last update ${esc(stamp(worker.updated_at))}">${esc(ago(worker.updated_at).replace(' ago', ''))}</span>
+        </button>
+        ${stale ? `<span class="worker-warn">${icon('alert')}No update for ${minutes}m — it may have stalled</span>` : ''}
+      </li>`);
+    }
+    patch($('#workers'), items.join(''));
+    $('#workers-note').textContent = `${running.length} of ${max} busy`;
+    const queued = scopeJobs().filter(job => job.stage === 'queued').length;
+    const foot = $('#workers-foot');
+    foot.hidden = !queued;
+    foot.textContent = queued ? `${plural(queued, 'business', 'businesses')} queued for the next free worker` : '';
+  }
+
+  function renderActivity() {
+    const jobs = jobsById();
+    const events = data.events
+      .filter(event => ui.batch === 'all' || (event.job_id && jobs.get(event.job_id) && jobs.get(event.job_id).batch_id === ui.batch))
+      .slice()
+      .sort((a, b) => (Date.parse(b.created_at) || 0) - (Date.parse(a.created_at) || 0) || b.id - a.id)
+      .slice(0, 40);
+    if (!events.length) {
+      patch($('#activity'), '<li class="feed-empty">No activity yet.</li>');
+      return;
+    }
+    patch($('#activity'), events.map(event => {
+      const job = event.job_id ? jobs.get(event.job_id) : null;
+      return `<li class="feed-item"${job ? ` data-tone="${toneOf(job)}"` : ''}>
+        <span class="feed-dot" aria-hidden="true"></span>
+        <div><p class="feed-msg">${esc(event.message)}</p>
+        <span class="feed-meta">${job ? `<button type="button" class="link-btn" data-open-job="${esc(job.id)}" data-key="feed-${esc(event.id)}">${esc(job.name)}</button><span aria-hidden="true">·</span>` : ''}<time datetime="${esc(event.created_at)}" title="${esc(stamp(event.created_at))}">${esc(ago(event.created_at))}</time></span></div>
+      </li>`;
+    }).join(''));
+  }
+
+  function renderControls() {
+    const select = $('#batch-select');
+    const options = ['<option value="all">All batches</option>'].concat(data.batches.slice().reverse().map(batch => `<option value="${esc(batch.id)}">${esc(batchName(batch))}</option>`)).join('');
+    if (select.__html !== options) {
+      select.innerHTML = options;
+      select.__html = options;
+    }
+    select.value = ui.batch;
+    $('#sort-select').value = ui.sort;
+    $$('[data-view]').forEach(button => button.setAttribute('aria-pressed', String(button.getAttribute('data-view') === ui.view)));
+    const sheet = $('#sheet-link');
+    const sheetUrl = safeUrl(data.sheet_url);
+    sheet.hidden = !sheetUrl;
+    if (sheetUrl) sheet.href = sheetUrl;
+    const viewer = data.viewer || {};
+    $('#forget-key').hidden = viewer.method !== 'key';
+    const industries = Array.from(new Set(data.batches.slice().reverse().map(batch => batch.industry).concat(['Electricians'])));
+    const cities = Array.from(new Set(data.batches.slice().reverse().map(batch => batch.city)));
+    patch($('#industry-options'), industries.map(value => `<option value="${esc(value)}"></option>`).join(''));
+    patch($('#city-options'), cities.map(value => `<option value="${esc(value)}"></option>`).join(''));
+  }
+
+  // ---------------------------------------------------------------------------
+  // Business drawer
+
+  function openJob(id) {
+    if (!jobsById().has(id)) return;
+    ui.job = id;
+    const drawer = $('#drawer');
+    $$('[data-part]', drawer).forEach(part => { part.__html = null; });
+    renderDrawer();
+    if (!drawer.open) drawer.showModal();
+    $('.drawer-scroll', drawer).scrollTop = 0;
+    loadActivity(id);
+  }
+
+  function renderDrawer() {
+    const drawer = $('#drawer');
+    const job = jobsById().get(ui.job);
+    if (!job) {
+      if (drawer.open) drawer.close();
+      return;
+    }
+    const part = name => $(`[data-part="${name}"]`, drawer);
+    const original = safeUrl(job.url), preview = safeUrl(job.preview_url);
+    patch(part('head'), `${avatar(job.name, 'lg')}
+      <div class="drawer-titles"><h2 id="drawer-title">${esc(job.name || 'Unnamed business')}</h2>${original ? `<a href="${esc(original)}" target="_blank" rel="noopener noreferrer">${esc(job.domain || hostOf(original))}</a>` : `<span class="job-domain">${esc(job.domain)}</span>`}</div>
+      <button type="button" class="icon-btn" data-close-drawer aria-label="Close details" data-key="drawer-close">${icon('x')}</button>`);
+    const states = stepStates(job);
+    patch(part('status'), `<div class="drawer-status">
+      <div class="drawer-meta">${chip(job)}<span title="${esc(stamp(job.updated_at))}">Updated ${esc(ago(job.updated_at))}</span></div>
+      ${preview || original ? `<div class="drawer-actions">${preview ? `<a class="btn btn-primary" href="${esc(preview)}" target="_blank" rel="noopener noreferrer">${icon('globe')}Open preview</a>` : ''}${original ? `<a class="btn btn-secondary" href="${esc(original)}" target="_blank" rel="noopener noreferrer">Original site ${icon('external')}</a>` : ''}</div>` : ''}
+      <ol class="steps" data-tone="${toneOf(job)}" aria-label="Pipeline progress">${STEPS.map((step, index) => {
+        const state = states[index];
+        const name = index === 6 && job.stage === 'manual' ? 'Manual' : step.label;
+        const marker = state === 'done' ? icon('check') : state === 'stop' ? icon('x') : '';
+        const spoken = state === 'done' ? 'done' : state === 'now' ? 'in progress' : state === 'stop' ? 'stopped here' : state === 'wait' ? 'waiting for a worker' : 'not started';
+        return `<li class="step is-${state}"><span class="step-dot" aria-hidden="true">${marker}</span><span class="step-label">${esc(name)}<span class="sr-only">, ${spoken}</span></span></li>`;
+      }).join('')}</ol>
+    </div>`);
+    patch(part('manual'), manualPanel(job));
+    patch(part('details'), detailsPanel(job));
+    patch(part('evidence'), evidencePanel(job));
+    renderDrawerActivity(job);
+  }
+
+  function contactRow(kind, value) {
+    const isEmail = kind === 'email';
+    const name = isEmail ? 'Email' : 'Phone';
+    const text = typeof value === 'string' ? value.trim() : '';
+    const valid = isEmail ? /^[^\s@<>"]+@[^\s@<>"]+\.[^\s@<>"]+$/.test(text) : /^\+?[0-9 ().-]{5,}$/.test(text);
+    if (!text) return `<div class="contact"><span class="contact-icon">${icon(isEmail ? 'mail' : 'phone')}</span><span class="contact-text"><span class="contact-label">${name}</span><span class="contact-value is-missing">Not available</span></span></div>`;
+    const href = isEmail ? `mailto:${text}` : `tel:${text.replace(/[^+0-9]/g, '')}`;
+    return `<div class="contact"><span class="contact-icon">${icon(isEmail ? 'mail' : 'phone')}</span>
+      <span class="contact-text"><span class="contact-label">${name}</span>${valid ? `<a class="contact-value" href="${esc(href)}" title="${esc(text)}">${esc(text)}</a>` : `<span class="contact-value" title="${esc(text)}">${esc(text)}</span>`}</span>
+      <button type="button" class="icon-btn icon-btn-sm" data-copy-value="${esc(text)}" data-copy-label="${name}" aria-label="Copy ${name.toLowerCase()}" title="Copy ${name.toLowerCase()}" data-key="copy-${kind}">${icon('copy')}</button></div>`;
+  }
+
+  function manualPanel(job) {
+    if (job.stage !== 'manual') {
+      if (dataOf(job).outreach_mode === 'manual' && category(job) === 'working') {
+        return `<section class="callout callout-manual"><h3>Manual outreach · website in progress</h3><p>This business can't be contacted through its own form. Once its preview is verified, the prepared message and contact details appear here.</p></section>`;
+      }
+      return '';
+    }
+    const info = manualInfo(job);
+    const sent = Boolean(info.sent_at);
+    const sources = (Array.isArray(info.source_urls) ? info.source_urls : []).map(safeUrl).filter(Boolean);
+    return `<section class="manual${sent ? ' is-sent' : ''}" aria-labelledby="manual-title">
+      <div class="manual-head"><span class="notice-icon">${icon(sent ? 'check' : 'hand')}</span><div>
+        <h3 id="manual-title">${sent ? 'Marked as sent' : 'Send this proposal yourself'}</h3>
+        <p>${sent ? `${esc(stamp(info.sent_at))}${info.sent_by ? ' by ' + esc(info.sent_by) : ''}. Undo if that was a mistake.` : 'The preview is live and verified, but this business has to be contacted by hand.'}</p>
+      </div></div>
+      ${info.reason ? `<p class="manual-reason"><b>Why manual:</b> ${esc(info.reason)}</p>` : ''}
+      <div class="contact-grid">${contactRow('email', info.email)}${contactRow('phone', info.phone)}</div>
+      ${sources.length ? `<p class="sources">Contact sources: ${sources.map(url => `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(shortUrl(url))}${icon('external')}</a>`).join('')}</p>` : ''}
+      <div class="field">
+        <label class="field-label" for="manual-message">Prepared message</label>
+        <textarea id="manual-message" class="message" readonly rows="9" spellcheck="false">${esc(info.message || '')}</textarea>
+      </div>
+      <div class="manual-actions">
+        <button type="button" class="btn btn-secondary" data-copy-message data-key="copy-message"${info.message ? '' : ' disabled'}>${icon('copy')}Copy message</button>
+        ${sent
+          ? `<button type="button" class="btn btn-ghost" data-manual-sent="0" data-job="${esc(job.id)}" data-key="manual-toggle">Mark as not sent</button>`
+          : `<button type="button" class="btn btn-primary" data-manual-sent="1" data-job="${esc(job.id)}" data-key="manual-toggle">${icon('check')}Mark as sent</button>`}
+      </div>
+      <p class="hint">Marking it sent only updates the ledger for your records. Nothing is sent from the dashboard.</p>
+    </section>`;
+  }
+
+  function detailsPanel(job) {
+    const batch = batchById(job.batch_id);
+    const contactForm = safeUrl(dataOf(job).contact_url);
+    const rows = [
+      ['Latest update', esc(job.detail || '—')],
+      job.reason ? ['Why it qualified', esc(job.reason)] : null,
+      ['Outreach', esc(CONTACT_LABELS[job.contact_status] || label(job.contact_status) || 'Not sent yet')],
+      contactForm ? ['Contact form', `<a href="${esc(contactForm)}" target="_blank" rel="noopener noreferrer">${esc(shortUrl(contactForm))}</a>`] : null,
+      ['Batch', batch ? `<button type="button" class="link-btn" data-set-batch="${esc(batch.id)}" data-close-drawer data-key="details-batch">${esc(batchName(batch))}</button>` : esc(job.batch_id)],
+      ['Worker', job.worker ? `<code>${esc(job.worker)}</code>` : 'Unassigned'],
+      ['Last change', esc(stamp(job.updated_at))],
+      job.data_error ? ['Ledger warning', esc(job.data_error)] : null,
+    ].filter(Boolean);
+    return `<section class="drawer-section"><h3>Details</h3><dl class="facts">${rows.map(row => `<div><dt>${row[0]}</dt><dd>${row[1]}</dd></div>`).join('')}</dl></section>`;
+  }
+
+  function evidencePanel(job) {
+    const facts = dataOf(job);
+    const qualification = facts.qualification && typeof facts.qualification === 'object' ? facts.qualification : {};
+    const findings = Array.isArray(qualification.findings) ? qualification.findings.filter(item => typeof item === 'string' && item.trim()) : [];
+    const sources = Array.isArray(facts.source_urls) ? facts.source_urls : [];
+    const shots = Array.isArray(facts.screenshots) ? facts.screenshots : [];
+    if (!findings.length && !sources.length && !shots.length) return '';
+    const links = list => list.map(item => {
+      const url = safeUrl(item);
+      return url ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(shortUrl(url))}</a>` : `<code>${esc(item)}</code>`;
+    }).join('');
+    return `<section class="drawer-section"><h3>Qualification</h3>
+      ${findings.length ? `<ul class="findings">${findings.map(item => `<li>${esc(item)}</li>`).join('')}</ul>` : ''}
+      ${typeof qualification.mobile_checked === 'boolean' ? `<p class="hint">${qualification.mobile_checked ? 'Mobile layout was checked.' : 'Mobile layout was not checked.'}</p>` : ''}
+      ${sources.length ? `<div class="evidence"><span class="field-label">Sources</span><span class="evidence-items">${links(sources)}</span></div>` : ''}
+      ${shots.length ? `<div class="evidence"><span class="field-label">Screenshots</span><span class="evidence-items">${links(shots)}</span></div>` : ''}
+    </section>`;
+  }
+
+  function renderDrawerActivity(job) {
+    const cached = activity[job.id];
+    const events = cached ? cached.events : data.events.filter(event => event.job_id === job.id);
+    patch($('[data-part="activity"]', $('#drawer')), events.length
+      ? events.map(event => `<li><p>${esc(event.message)}</p><time datetime="${esc(event.created_at)}">${esc(stamp(event.created_at))} · ${esc(ago(event.created_at))}</time></li>`).join('')
+      : '<li class="timeline-empty">No recorded activity yet.</li>');
+  }
+
+  function loadActivity(id) {
+    const wanted = revision;
+    if (activity[id] && activity[id].revision === wanted) return;
+    server('getJobActivity', id, accessKey).then(events => {
+      activity[id] = { revision: wanted, events: Array.isArray(events) ? events : [] };
+      const job = jobsById().get(id);
+      if (ui.job === id && job && $('#drawer').open) renderDrawerActivity(job);
+    }).catch(() => { /* the snapshot's recent events stay visible */ });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Sync
+
+  function setSync(state, text) {
+    const sync = $('#sync');
+    sync.setAttribute('data-state', state);
+    $('.sync-label', sync).textContent = text;
+    sync.title = state === 'live' ? `Live — last synced ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}` : text;
+  }
+
+  function schedule() {
+    window.clearTimeout(pollTimer);
+    if (locked) return;
+    const delay = document.hidden ? 30000 : failures ? Math.min(30000, 4000 * Math.pow(2, failures - 1)) : 4000;
+    pollTimer = window.setTimeout(poll, delay);
+  }
+
+  function poll(force) {
+    if (pollInFlight || locked) return;
+    pollInFlight = true;
+    window.clearTimeout(pollTimer);
+    const known = force === true || Date.now() - lastFullFetch > 60000 ? null : revision;
+    server('getState', known, accessKey).then(result => {
+      failures = 0;
+      if (!result.unchanged) {
+        applyState(result);
+        lastFullFetch = Date.now();
+      }
+      setSync('live', 'Live');
+    }).catch(error => {
+      if (isAccessError(error)) {
+        showLock(error);
+        return;
+      }
+      failures += 1;
+      setSync(failures > 2 ? 'offline' : 'retrying', failures > 2 ? 'Offline' : 'Reconnecting…');
+      if (!data) showLoadError(error);
+    }).then(() => {
+      pollInFlight = false;
+      schedule();
+    });
+  }
+
+  function applyState(next) {
+    revision = next.revision;
+    const serverTime = Date.parse(next.server_time);
+    if (Number.isFinite(serverTime)) clockSkew = serverTime - Date.now();
+    data = {
+      batches: Array.isArray(next.batches) ? next.batches : [],
+      jobs: Array.isArray(next.jobs) ? next.jobs : [],
+      events: Array.isArray(next.events) ? next.events : [],
+      workers: Array.isArray(next.workers) ? next.workers : [],
+      settings: next.settings || {},
+      viewer: next.viewer || {},
+      sheet_url: next.sheet_url || '',
+    };
+    render();
+    if (ui.job && $('#drawer').open) loadActivity(ui.job);
+  }
+
+  function showLoadError(error) {
+    const notice = $('#notice');
+    notice.hidden = false;
+    notice.setAttribute('data-tone', 'attention');
+    patch(notice, `<span class="notice-icon">${icon('alert')}</span><div class="notice-body"><b>The ledger couldn't be loaded.</b><p>${esc(errorText(error))}</p></div><div class="notice-actions"><button type="button" class="btn btn-secondary btn-sm" data-retry data-key="retry">${icon('refresh')}Try again</button></div>`);
+    $('#scope-sub').textContent = 'Not connected';
+  }
+
+  // ---------------------------------------------------------------------------
+  // Access
+
+  function showLock(error) {
+    locked = true;
+    window.clearTimeout(pollTimer);
+    const message = errorText(error);
+    const lock = $('#lock');
+    const hadKey = Boolean(accessKey);
+    if (hadKey) {
+      accessKey = '';
+      storage.set('wg.key', null);
+    }
+    $('#lock-error').textContent = hadKey && /not valid/i.test(message) ? 'The saved key no longer works. Enter the current dashboard key.' : '';
+    lock.hidden = false;
+    $('#app').setAttribute('aria-hidden', 'true');
+    $('#app').inert = true;
+    setSync('connecting', 'Locked');
+    window.setTimeout(() => $('#lock-key').focus(), 0);
+  }
+
+  function hideLock() {
+    locked = false;
+    $('#lock').hidden = true;
+    $('#app').removeAttribute('aria-hidden');
+    $('#app').inert = false;
+  }
+
+  $('#lock-form').addEventListener('submit', event => {
+    event.preventDefault();
+    const input = $('#lock-key');
+    const candidate = input.value.trim();
+    const errorBox = $('#lock-error');
+    if (!candidate) {
+      errorBox.textContent = 'Enter the dashboard key.';
+      input.focus();
+      return;
+    }
+    const button = $('#lock-submit');
+    button.disabled = true;
+    button.textContent = 'Checking…';
+    errorBox.textContent = '';
+    server('getState', null, candidate).then(result => {
+      accessKey = candidate;
+      storage.set('wg.key', candidate);
+      input.value = '';
+      hideLock();
+      failures = 0;
+      applyState(result);
+      lastFullFetch = Date.now();
+      setSync('live', 'Live');
+      schedule();
+    }).catch(error => {
+      errorBox.textContent = isAccessError(error) ? "That key didn't work. Check it and try again." : errorText(error);
+      input.select();
+    }).then(() => {
+      button.disabled = false;
+      button.textContent = 'Unlock';
+    });
+  });
+
+  $('#forget-key').addEventListener('click', () => {
+    accessKey = '';
+    storage.set('wg.key', null);
+    data = null;
+    revision = null;
+    showLock(new Error('ACCESS_DENIED: locked'));
+    $('#lock-error').textContent = '';
+  });
+
+  // ---------------------------------------------------------------------------
+  // Toasts
+
+  function toast(message, tone) {
+    const host = $('#toasts');
+    const dialog = document.querySelector('dialog[open]');
+    const parent = dialog || document.body;
+    if (host.parentElement !== parent) parent.appendChild(host);
+    const item = document.createElement('div');
+    item.className = 'toast' + (tone === 'error' ? ' is-error' : '');
+    item.setAttribute('role', tone === 'error' ? 'alert' : 'status');
+    item.innerHTML = `${icon(tone === 'error' ? 'alert' : 'check')}<span>${esc(message)}</span>`;
+    host.appendChild(item);
+    window.setTimeout(() => {
+      item.classList.add('is-leaving');
+      window.setTimeout(() => item.remove(), 220);
+    }, tone === 'error' ? 6000 : 3200);
+  }
+
+  function copyAndTell(text, what) {
+    return copyText(text).then(copied => toast(copied ? `${what} copied` : `Couldn't copy automatically — select the text and copy it`, copied ? 'ok' : 'error'));
+  }
+
+  // ---------------------------------------------------------------------------
+  // New batch
+
+  const batchDialog = $('#batch-dialog');
+  const batchForm = $('#batch-form');
+
+  function openBatchDialog() {
+    batchForm.reset();
+    batchForm.elements.requested_count.value = '5';
+    $$('[aria-invalid]', batchForm).forEach(field => field.removeAttribute('aria-invalid'));
+    $('#batch-error').textContent = '';
+    batchForm.hidden = false;
+    $('#batch-done').hidden = true;
+    syncPresets();
+    if (!batchDialog.open) batchDialog.showModal();
+    batchForm.elements.industry.focus();
+  }
+
+  function clampCount(value) {
+    const number = Math.round(Number(value));
+    return Number.isFinite(number) ? Math.min(100, Math.max(1, number)) : 5;
+  }
+  function syncPresets() {
+    const value = String(batchForm.elements.requested_count.value);
+    $$('[data-preset]', batchForm).forEach(button => button.setAttribute('aria-pressed', String(button.getAttribute('data-preset') === value)));
+  }
+
+  batchForm.addEventListener('click', event => {
+    const step = event.target.closest('[data-step]');
+    const preset = event.target.closest('[data-preset]');
+    const field = batchForm.elements.requested_count;
+    if (step) field.value = clampCount(Number(field.value || 0) + Number(step.getAttribute('data-step')));
+    if (preset) field.value = preset.getAttribute('data-preset');
+    if (step || preset) syncPresets();
+  });
+  batchForm.elements.requested_count.addEventListener('input', syncPresets);
+  batchForm.elements.requested_count.addEventListener('blur', event => {
+    if (event.target.value !== '') event.target.value = clampCount(event.target.value);
+    syncPresets();
+  });
+
+  batchForm.addEventListener('submit', event => {
+    event.preventDefault();
+    const industry = batchForm.elements.industry.value.trim();
+    const city = batchForm.elements.city.value.trim();
+    const count = Number(batchForm.elements.requested_count.value);
+    const problems = [];
+    batchForm.elements.industry.setAttribute('aria-invalid', String(!industry));
+    batchForm.elements.city.setAttribute('aria-invalid', String(!city));
+    const countValid = Number.isInteger(count) && count >= 1 && count <= 100;
+    batchForm.elements.requested_count.setAttribute('aria-invalid', String(!countValid));
+    if (!industry) problems.push('an industry');
+    if (!city) problems.push('a city or state');
+    if (!countValid) problems.push('a website count from 1 to 100');
+    if (problems.length) {
+      $('#batch-error').textContent = `Add ${problems.join(', ').replace(/, ([^,]*)$/, ' and $1')}.`;
+      (batchForm.querySelector('[aria-invalid="true"]') || batchForm.elements.industry).focus();
+      return;
+    }
+    const submit = $('#batch-submit');
+    submit.disabled = true;
+    submit.textContent = 'Queuing…';
+    $('#batch-error').textContent = '';
+    server('queueBatch', { industry, city, requested_count: count }, accessKey).then(result => {
+      const batch = { id: result.id, industry, city, requested_count: result.requested_count };
+      $('#batch-done-summary').textContent = `${industry} · ${city} · ${plural(result.requested_count, 'website')}`;
+      $('#batch-prompt').textContent = runPrompt(batch);
+      batchForm.hidden = true;
+      $('#batch-done').hidden = false;
+      $('#copy-prompt').focus();
+      ui.batch = 'all';
+      poll(true);
+    }).catch(error => {
+      if (isAccessError(error)) {
+        batchDialog.close();
+        showLock(error);
+        return;
+      }
+      $('#batch-error').textContent = `The batch couldn't be queued: ${errorText(error)}`;
+    }).then(() => {
+      submit.disabled = false;
+      submit.textContent = 'Queue batch';
+    });
+  });
+
+  $('#copy-prompt').addEventListener('click', () => copyAndTell($('#batch-prompt').textContent, 'Prompt'));
+  [['#batch-form', '#batch-error'], ['#cancel-form', '#cancel-error'], ['#lock-form', '#lock-error']].forEach(([form, box]) => $(form).addEventListener('input', event => {
+    $(box).textContent = '';
+    if (event.target.hasAttribute('aria-invalid')) event.target.removeAttribute('aria-invalid');
+  }));
+
+  // ---------------------------------------------------------------------------
+  // Cancel batch
+
+  const cancelDialog = $('#cancel-dialog');
+  const cancelForm = $('#cancel-form');
+  let cancelTarget = null;
+
+  function openCancelDialog(id) {
+    const batch = batchById(id);
+    if (!batch) return;
+    cancelTarget = id;
+    cancelForm.reset();
+    $('#cancel-error').textContent = '';
+    $('#cancel-batch-name').textContent = `${batchName(batch)} · ${batch.completed_count} of ${batch.requested_count} sent · ${plural(batch.active_count, 'business', 'businesses')} in progress`;
+    cancelDialog.showModal();
+    cancelForm.elements.reason.focus();
+  }
+
+  cancelForm.addEventListener('submit', event => {
+    event.preventDefault();
+    const reason = cancelForm.elements.reason.value.trim();
+    if (!reason) {
+      $('#cancel-error').textContent = 'Say why you are cancelling. It is saved with the batch history.';
+      cancelForm.elements.reason.focus();
+      return;
+    }
+    const submit = $('#cancel-submit');
+    submit.disabled = true;
+    submit.textContent = 'Cancelling…';
+    server('cancelBatchFromDashboard', cancelTarget, reason, accessKey).then(result => {
+      cancelDialog.close();
+      toast(`Batch cancelled · ${plural(result.stopped_jobs, 'business', 'businesses')} stopped`);
+      poll(true);
+    }).catch(error => {
+      if (isAccessError(error)) {
+        cancelDialog.close();
+        showLock(error);
+        return;
+      }
+      $('#cancel-error').textContent = errorText(error);
+    }).then(() => {
+      submit.disabled = false;
+      submit.textContent = 'Cancel batch';
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Events
+
+  function setBatch(id) {
+    ui.batch = id && batchById(id) ? id : 'all';
+    render();
+  }
+
+  document.addEventListener('click', event => {
+    const target = event.target;
+    const close = target.closest('[data-close]');
+    if (close) {
+      const dialog = close.closest('dialog');
+      if (dialog) dialog.close();
+      return;
+    }
+    const opener = target.closest('[data-open-job]');
+    if (opener) {
+      openJob(opener.getAttribute('data-open-job'));
+      return;
+    }
+    const batchButton = target.closest('[data-set-batch]');
+    if (batchButton) {
+      setBatch(batchButton.getAttribute('data-set-batch'));
+      if (batchButton.hasAttribute('data-close-drawer')) $('#drawer').close();
+      return;
+    }
+    if (target.closest('[data-close-drawer]')) {
+      $('#drawer').close();
+      return;
+    }
+    const filter = target.closest('[data-filter]');
+    if (filter) {
+      const key = filter.getAttribute('data-filter');
+      ui.filter = filter.classList.contains('kpi') && ui.filter === key ? 'all' : key;
+      render();
+      const panel = $('.jobs-panel');
+      if (filter.classList.contains('kpi') && panel.getBoundingClientRect().top > window.innerHeight * 0.6) panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      return;
+    }
+    const prompt = target.closest('[data-copy-prompt]');
+    if (prompt) {
+      const batch = batchById(prompt.getAttribute('data-copy-prompt'));
+      if (batch) copyAndTell(runPrompt(batch), 'Run prompt');
+      return;
+    }
+    const cancel = target.closest('[data-cancel-batch]');
+    if (cancel) {
+      openCancelDialog(cancel.getAttribute('data-cancel-batch'));
+      return;
+    }
+    if (target.closest('[data-new-batch]')) {
+      openBatchDialog();
+      return;
+    }
+    if (target.closest('[data-clear-filters]')) {
+      ui.filter = 'all';
+      ui.search = '';
+      $('#search').value = '';
+      render();
+      return;
+    }
+    if (target.closest('[data-retry]')) {
+      $('#notice').hidden = true;
+      setSync('connecting', 'Connecting…');
+      poll(true);
+      return;
+    }
+    const copyValue = target.closest('[data-copy-value]');
+    if (copyValue) {
+      copyAndTell(copyValue.getAttribute('data-copy-value'), copyValue.getAttribute('data-copy-label') || 'Text');
+      return;
+    }
+    if (target.closest('[data-copy-message]')) {
+      const area = $('#manual-message');
+      copyText(area.value).then(copied => {
+        if (copied) toast('Message copied');
+        else {
+          area.focus();
+          area.select();
+          toast('Message selected — use your copy shortcut', 'error');
+        }
+      });
+      return;
+    }
+    const manual = target.closest('[data-manual-sent]');
+    if (manual) {
+      const sent = manual.getAttribute('data-manual-sent') === '1';
+      manual.disabled = true;
+      server('setManualSent', manual.getAttribute('data-job'), sent, accessKey).then(() => {
+        toast(sent ? 'Marked as sent' : 'Sent mark removed');
+        poll(true);
+      }).catch(error => {
+        manual.disabled = false;
+        if (isAccessError(error)) showLock(error);
+        else toast(errorText(error), 'error');
+      });
+      return;
+    }
+    const row = target.closest('[data-row-job]');
+    if (row && !target.closest('a, button')) openJob(row.getAttribute('data-row-job'));
+  });
+
+  // Close a dialog when its backdrop is clicked.
+  $$('dialog').forEach(dialog => dialog.addEventListener('click', event => {
+    if (event.target !== dialog) return;
+    const box = dialog.getBoundingClientRect();
+    const inside = event.clientX >= box.left && event.clientX <= box.right && event.clientY >= box.top && event.clientY <= box.bottom;
+    if (!inside || dialog.classList.contains('drawer')) dialog.close();
+  }));
+  $('#drawer').addEventListener('close', () => { ui.job = null; });
+  $$('dialog').forEach(dialog => dialog.addEventListener('close', () => {
+    const host = $('#toasts');
+    if (host.parentElement === dialog) document.body.appendChild(host);
+  }));
+
+  $('#new-batch').addEventListener('click', openBatchDialog);
+  $('#batch-select').addEventListener('change', event => setBatch(event.target.value));
+  $('#sort-select').addEventListener('change', event => {
+    ui.sort = event.target.value;
+    storage.set('wg.sort', ui.sort);
+    renderJobs();
+  });
+  $$('[data-view]').forEach(button => button.addEventListener('click', () => {
+    ui.view = button.getAttribute('data-view');
+    storage.set('wg.view', ui.view);
+    renderControls();
+    renderJobs();
+  }));
+
+  let searchTimer = null;
+  $('#search').addEventListener('input', event => {
+    window.clearTimeout(searchTimer);
+    searchTimer = window.setTimeout(() => {
+      ui.search = event.target.value.trim().toLowerCase();
+      renderJobs();
+    }, 120);
+  });
+  document.addEventListener('keydown', event => {
+    const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement && document.activeElement.tagName);
+    if (event.key === '/' && !typing && !locked && !document.querySelector('dialog[open]')) {
+      event.preventDefault();
+      $('#search').focus();
+    }
+    if (event.key === 'Escape' && document.activeElement === $('#search') && $('#search').value) {
+      $('#search').value = '';
+      ui.search = '';
+      renderJobs();
+    }
+  });
+
+  $('#theme-toggle').addEventListener('click', () => {
+    const current = document.documentElement.getAttribute('data-theme') || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+    const next = current === 'dark' ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', next);
+    storage.set('wg.theme', next);
+  });
+
+  narrow.addEventListener('change', () => { if (data) renderJobs(); });
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && !locked) poll();
+    else schedule();
+  });
+  // Relative times ("3m ago") and stalled-worker warnings advance without a server round trip.
+  window.setInterval(() => { if (data && !document.hidden) render(); }, 30000);
+
+  poll(true);
+})();
+</script>

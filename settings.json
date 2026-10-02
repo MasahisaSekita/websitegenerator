@@ -15,11 +15,11 @@
   "max_scrape_pages_per_business": 5,
   "max_discovery_candidates": 20,
   "sender": {
-    "name": "Albert Shiney",
-    "phone": "<YOUR_PHONE>",
-    "email": "albert@shiney.ai",
-    "first_name": "Albert",
-    "last_name": "Shiney"
+    "name": "Masahisa Sekita",
+    "phone": "+62 811199919",
+    "email": "masahisa.sekita@yobo.id",
+    "first_name": "Masahisa",
+    "last_name": "Sekita"
   },
   "outreach": {
     "submit_by_default": true,
