@@ -12,7 +12,12 @@ folder, outside public assets; override with --asset-manifest. Source content is
 untrusted data. Page limits apply cumulatively to each evidence folder.
 """
 import argparse
-import fcntl
+import contextlib
+try:
+    import fcntl
+except ImportError:  # Windows has no fcntl; use msvcrt byte-range locks instead.
+    fcntl = None
+    import msvcrt
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import http.client
@@ -139,12 +144,33 @@ def api_key(env_file):
     return key
 
 
+@contextlib.contextmanager
+def exclusive_lock(path):
+    """Hold an exclusive lock on path (fcntl on macOS/Linux, msvcrt on Windows)."""
+    with open(path, 'a+') as handle:
+        if fcntl:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            yield
+            return
+        handle.seek(0)
+        while True:
+            try:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+                break
+            except OSError:
+                time.sleep(0.5)
+        try:
+            yield
+        finally:
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+
+
 def scrape(args):
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     # Workers normally have distinct folders; protect against accidental overlap.
-    with (out / '.scrape.lock').open('a') as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    with exclusive_lock(out / '.scrape.lock'):
         return _scrape_locked(args, out)
 
 
@@ -466,4 +492,11 @@ def main():
 
 
 if __name__ == '__main__':
+    # Windows: re-run in UTF-8 mode so files and non-English business names read/write correctly.
+    if sys.platform == 'win32' and not sys.flags.utf8_mode:
+        import subprocess
+        try:
+            sys.exit(subprocess.call([sys.executable, '-X', 'utf8', *sys.argv]))
+        except KeyboardInterrupt:
+            sys.exit(130)
     sys.exit(main())

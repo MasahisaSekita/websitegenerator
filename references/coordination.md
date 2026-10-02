@@ -1,6 +1,6 @@
 # Coordinator, ledger and workers
 
-All commands run from the skill root. Browser ownership and work directories must remain separate. The UI is a read-mostly monitor plus a batch request queue; an active Codex coordinator performs work.
+All commands run from the skill root (on Windows use `python` in place of `python3`; see “Running on Windows” in SKILL.md). Browser ownership and work directories must remain separate. The UI is a read-mostly monitor plus a batch request queue; an active Codex coordinator performs work.
 
 ## Ledger CLI
 

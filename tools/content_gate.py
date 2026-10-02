@@ -41,4 +41,11 @@ def main():
     print('Content gate passed.')
 
 if __name__ == '__main__':
+    # Windows: re-run in UTF-8 mode so files and non-English business names read/write correctly.
+    if sys.platform == 'win32' and not sys.flags.utf8_mode:
+        import subprocess
+        try:
+            sys.exit(subprocess.call([sys.executable, '-X', 'utf8', *sys.argv]))
+        except KeyboardInterrupt:
+            sys.exit(130)
     sys.exit(main())

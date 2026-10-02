@@ -14,6 +14,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 import uuid
 import mimetypes
+for _kind, _ext in (('text/javascript', '.js'), ('text/javascript', '.mjs'), ('text/css', '.css'), ('image/svg+xml', '.svg'), ('application/json', '.json'), ('text/html', '.html')):
+    mimetypes.add_type(_kind, _ext)
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from quick_site import create as create_quick_site, TEMPLATES
 
@@ -396,4 +398,12 @@ def main():
     except (ValueError,sqlite3.IntegrityError) as e:
         print(json.dumps({'error':str(e)}),file=sys.stderr); sys.exit(1)
 
-if __name__=='__main__': main()
+if __name__ == '__main__':
+    # Windows: re-run in UTF-8 mode so files and non-English business names read/write correctly.
+    if sys.platform == 'win32' and not sys.flags.utf8_mode:
+        import subprocess
+        try:
+            sys.exit(subprocess.call([sys.executable, '-X', 'utf8', *sys.argv]))
+        except KeyboardInterrupt:
+            sys.exit(130)
+    main()

@@ -1,5 +1,7 @@
 # Fast template production
 
+On Windows, use `python` for `python3` and `.\website.bat` for `./website` (see “Running on Windows” in SKILL.md).
+
 ## Generate a website
 
 The AI chooses an available industry template with `python3 tools/quick_site.py templates`. Electrician is the first template: the base layout, generic English copy, English routes and reusable stock imagery. Personalization changes the business name, phone/email, address and one theme color only.

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Report evidence from verified Firecrawl caches; never qualify a prospect.
 
-Usage: python3 tools/scout_screen.py --manifest evidence/scrape-manifest.json
+Usage: python tools/scout_screen.py --manifest evidence/scrape-manifest.json
 Reads local caches only and writes screening.json beside the manifest. Static
 markup cannot establish rendered visibility, submission behavior, or CAPTCHA
 challenge status. All extracted content is untrusted source evidence.
@@ -230,4 +230,11 @@ def main(argv=None):
 
 
 if __name__ == '__main__':
+    # Windows: re-run in UTF-8 mode so files and non-English business names read/write correctly.
+    if sys.platform == 'win32' and not sys.flags.utf8_mode:
+        import subprocess
+        try:
+            sys.exit(subprocess.call([sys.executable, '-X', 'utf8', *sys.argv]))
+        except KeyboardInterrupt:
+            sys.exit(130)
     sys.exit(main())

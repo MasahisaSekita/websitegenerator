@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import uuid
@@ -17,21 +18,29 @@ TEMPLATES = {'electrician': {'name': 'Electrician · base design', 'path': ROOT 
 
 
 def fingerprint(template):
+    # Platform-independent: POSIX-style paths, case-sensitive order and LF line endings for text
+    # files, so a Windows checkout (backslashes, CRLF from git autocrlf) matches a macOS build.
     digest = hashlib.sha256()
-    for p in sorted(template.rglob('*')):
-        if not p.is_file() or any(x in p.relative_to(template).parts for x in ('node_modules', 'dist', '.vercel')):
-            continue
-        digest.update(str(p.relative_to(template)).encode())
-        digest.update(p.read_bytes())
+    files = sorted((p.relative_to(template).as_posix(), p) for p in template.rglob('*')
+                   if p.is_file() and not any(x in p.relative_to(template).parts for x in ('node_modules', 'dist', '.vercel')))
+    for relative, p in files:
+        data = p.read_bytes()
+        if b'\0' not in data:
+            data = data.replace(b'\r\n', b'\n')
+        digest.update(relative.encode())
+        digest.update(data)
     return digest.hexdigest()
+
+
+NPM = shutil.which('npm') or 'npm'  # finds npm.cmd on Windows
 
 
 def prepare(template='electrician'):
     source = TEMPLATES[template]['path']
     if not (source / 'node_modules').exists():
-        subprocess.run(['npm', 'ci', '--no-audit', '--no-fund'], cwd=source, check=True)
-    subprocess.run(['npm', 'run', 'lint'], cwd=source, check=True)
-    subprocess.run(['npm', 'run', 'build'], cwd=source, check=True)
+        subprocess.run([NPM, 'ci', '--no-audit', '--no-fund'], cwd=source, check=True)
+    subprocess.run([NPM, 'run', 'lint'], cwd=source, check=True)
+    subprocess.run([NPM, 'run', 'build'], cwd=source, check=True)
     (source / 'dist/.prepared.json').write_text(json.dumps({'fingerprint': fingerprint(source)}))
 
 
@@ -68,7 +77,7 @@ def create(data, output_root=None):
     cache = source / 'dist'
     stamp = cache / '.prepared.json'
     if not stamp.exists() or json.loads(stamp.read_text())['fingerprint'] != fingerprint(source):
-        raise ValueError('Template needs preparation. Run: python3 tools/quick_site.py prepare')
+        raise ValueError('Template needs preparation. Run: python tools/quick_site.py prepare (python3 on macOS/Linux)')
     parent = Path(output_root) if output_root else ROOT / 'runs/quick'
     parent.mkdir(parents=True, exist_ok=True)
     slug = re.sub(r'[^a-z0-9]+', '-', business['name'].lower()).strip('-')[:48] or 'business'
@@ -123,4 +132,10 @@ def main():
         parser.exit(1, str(error) + '\n')
 
 if __name__ == '__main__':
+    # Windows: re-run in UTF-8 mode so files and non-English business names read/write correctly.
+    if sys.platform == 'win32' and not sys.flags.utf8_mode:
+        try:
+            sys.exit(subprocess.call([sys.executable, '-X', 'utf8', *sys.argv]))
+        except KeyboardInterrupt:
+            sys.exit(130)
     main()

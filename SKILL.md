@@ -11,6 +11,17 @@ The skill folder is the application root. Resolve it from this SKILL.md, set it 
 
 For state-wide batches, the coordinator discovers the city list and dispatches one fresh scout per city sequentially, feeding fresh builder/sender agents, sharing one completed-outreach target and cross-city deduplication. A supplied state is sufficient; do not require a city list from Albert. For new batch runs, use the [parallel scouting and building skill](skills/local-business-revamp-parallel/SKILL.md) as the default coordinator workflow. It shares this application, ledger, template and fixed outreach reference; it does not create a second dashboard. The workflow below remains the single-worker fallback.
 
+## Running on Windows
+
+The application runs natively on Windows; WSL is not required. Work in PowerShell from the application root and translate the commands in this skill and its references:
+
+- `python3 tools/...` → `python tools/...` (or `py -3 tools/...`).
+- `./website ...` → `.\website.bat ...`.
+- Dashboard: double-click `Open Dashboard.bat`, or run `python tools/control.py serve --port 4310`.
+- Forward-slash paths and the single-quoted arguments shown in the references work as-is in PowerShell.
+- The Python tools switch themselves to UTF-8 mode on Windows; no extra setup is needed.
+- Template edits (`quick_site.py prepare`) need Node/npm on PATH. The prerender script needs `CHROME_PATH` set to Chrome's location, e.g. `C:\Program Files\Google\Chrome\Application\chrome.exe`.
+
 ## AI owns the complete run
 
 When Albert runs this skill with an industry and city, carry each qualified prospect through **research → choose template and color → run generator → verify → deploy → verify public URL → submit outreach → record result**. The AI does this work; do not ask Albert to enter a business name, phone, email, address or theme color, fill out a dashboard form, run a command, deploy a site, or manually send the prepared message. For a real batch, submit outreach when the original form is usable; otherwise the required final step is a verified website and manual outreach handoff under [Manual outreach](references/manual-outreach.md); honor only an explicit dry-run or narrower scope. If the active computer-use environment imposes a non-overridable confirmation at the final form action, request it then and only then.
