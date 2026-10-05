@@ -51,6 +51,7 @@ The contact-sheet dashboard and the job ledger, running on Google Apps Script wi
 3. **Run setup.** In the editor toolbar, choose `setup` and click **Run**.
    - The first time, Google asks you to authorize the script: **Review permissions**, choose your account, then **Advanced → Go to … (unsafe)** → **Allow**. That warning is normal for your own scripts.
    - It asks for the spreadsheet, plus three permissions the GitHub runner uses: connecting to an external service (GitHub), Drive (for the website files) and running on a schedule (the safety trigger).
+   - Google shows a checkbox for each permission. Tick **Select all**: the GitHub runner fails if any of them is left out.
    - Setup creates the ledger tabs, checks that Sheets keeps values exactly as written, and generates the agent token and the dashboard key. It takes about 10–30 seconds.
    - The execution log ends with `Ledger ready: …`. Reload the spreadsheet: a **Website Generator** menu appears.
 4. **Deploy the web app.** Choose **Deploy → New deployment → Select type → Web app**. Set **Execute as: Me** and **Who has access: Anyone**, then click **Deploy** and copy the **Web app URL**, which ends in `/exec`.
@@ -184,9 +185,10 @@ A 10-minute trigger re-sends a start that got lost. A run with nothing to do end
 5. **Only if you set up before `Runner.gs` existed: update the code.** A fresh setup already has it, so skip to step 6.
    1. Add a script file named `Runner` (**+ → Script**) and paste `src/Runner.gs` into it.
    2. Paste the current `Code.gs`, `Ledger.gs`, `Index.html` and `App.html` too, since they changed with it. Save, then reload the spreadsheet so the menu shows the new items.
-   3. Choose **Website Generator → Set up or repair the ledger**. Google asks you to approve the new permissions (connecting to GitHub, Drive and the trigger). If setup doesn't run after you approve, choose the item again. Your agent token and dashboard key stay the same.
+   3. Choose **Website Generator → Set up or repair the ledger**. Google asks you to approve the new permissions (connecting to GitHub, Drive and the trigger): tick **Select all**. If setup doesn't run after you approve, choose the item again. Your agent token and dashboard key stay the same.
    4. Deploy a new version (see [Updating the code later](#updating-the-code-later)). The GitHub job talks to the deployed version, so this step can't be skipped.
 6. **Switch it on.** In the ledger spreadsheet, choose **Website Generator → Run on GitHub (no computer needed)…**.
+   - If a permission is still missing, Google asks for it first. Tick **Select all**, then choose the menu item again.
    - It sets up the 10-minute safety trigger and sends a test start.
    - A *Website generator* run appears in the repository's **Actions** tab and finishes quickly, because nothing is waiting.
 
@@ -242,6 +244,7 @@ Use this if you don't use the GitHub runner. The computer must stay on while you
 | Changes don't show on the dashboard | The web app still runs the old version. Deploy a new version. |
 | `Received a Google page instead of JSON` from `ping` | The deployment isn't set to **Who has access: Anyone**, or you used the `/dev` address instead of `/exec`. |
 | The GitHub panel says *Can't start on GitHub* | Check `GITHUB_REPO` and `GITHUB_TOKEN` in Script properties: the token needs **Contents: Read and write** on that repository. |
+| `You do not have permission to call UrlFetchApp.fetch`, or *Google hasn't allowed this script to connect to GitHub* | A permission was left unticked on Google's permission screen. Choose **Website Generator → Run on GitHub…** again. Google asks for the missing permission: tick **Select all**, then choose the item once more. |
 | A GitHub run fails with a message about secrets | Add the missing secret named in the run's log under **Settings → Secrets and variables → Actions**. |
 
 ## Access and security

@@ -60,7 +60,10 @@ function dispatchGitHub_(reason) {
         record.error = `GitHub did not start the job (HTTP ${code})` + ([401, 403, 404].indexOf(code) >= 0 ? ': check GITHUB_TOKEN and GITHUB_REPO.' : '.');
       }
     } catch (error) {
-      record.error = 'Could not reach GitHub: ' + (error && error.message ? error.message : String(error));
+      const message = error && error.message ? error.message : String(error);
+      record.error = /permission to call|authorization is required/i.test(message)
+        ? 'Google hasn\'t allowed this script to connect to GitHub. In the ledger sheet, choose Website Generator → Run on GitHub… and allow every permission (tick Select all).'
+        : 'Could not reach GitHub: ' + message;
     }
   }
   props.setProperty(PROP_DISPATCH_, JSON.stringify(record));
@@ -129,6 +132,9 @@ function sitesFolder_() {
 
 /** Sends new work to GitHub Actions, so no computer has to stay on. Safe to run again. */
 function useGitHubRunner() {
+  // Google's permission screen lets people untick permissions, and the trigger and web app can't ask later.
+  // This stops and shows Google's prompt again while any permission the script uses is missing.
+  ScriptApp.requireAllScopes(ScriptApp.AuthMode.FULL);
   requireOwner_();
   const props = PropertiesService.getScriptProperties();
   props.setProperty(PROP_RUNNER_, 'github');

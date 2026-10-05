@@ -222,6 +222,7 @@ export function createRuntime({ owner = 'owner@example.com', viewer = 'owner@exa
   // UrlFetchApp records each request; tests set state.fetchReply to answer like GitHub would.
   const fetches = [];
   state.fetchReply = () => ({ code: 204, body: '' });
+  state.missingScopes = [];
   const drive = new FakeDrive();
   const triggers = [];
   const context = vm.createContext({ console: sandboxConsole });
@@ -311,6 +312,12 @@ export function createRuntime({ owner = 'owner@example.com', viewer = 'owner@exa
     MimeType: { HTML: 'text/html', PLAIN_TEXT: 'text/plain', JSON: 'application/json' },
     DriveApp: drive,
     ScriptApp: {
+      AuthMode: { NONE: 'NONE', LIMITED: 'LIMITED', CUSTOM_FUNCTION: 'CUSTOM_FUNCTION', FULL: 'FULL' },
+      // Granular consent: tests list the permissions the owner left unticked in state.missingScopes.
+      // The real method ends the execution and shows Google's prompt; here it throws.
+      requireAllScopes: () => {
+        if (state.missingScopes.length) throw new GasError('Authorization is required to perform that action.');
+      },
       getProjectTriggers: () => triggers.slice(),
       deleteTrigger: trigger => { const index = triggers.indexOf(trigger); if (index >= 0) triggers.splice(index, 1); },
       newTrigger: handler => ({

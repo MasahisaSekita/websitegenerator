@@ -712,6 +712,9 @@ describe('GitHub runner (no computer needed)', () => {
     assert.match(gas.as(OWNER, 'getState', null, '').runner.dispatch.error, /HTTP 401/);
     gas.state.fetchReply = () => ({ throws: 'Address unavailable' });
     assert.match(gas.call('dispatchGitHub_', 'test').error, /Could not reach GitHub: Address unavailable/);
+    // The owner left "Connect to an external service" unticked on Google's permission screen.
+    gas.state.fetchReply = () => ({ throws: 'You do not have permission to call UrlFetchApp.fetch. Required permissions: https://www.googleapis.com/auth/script.external_request' });
+    assert.match(gas.call('dispatchGitHub_', 'test').error, /Run on GitHub… and allow every permission \(tick Select all\)/);
     gas.props.delete('GITHUB_TOKEN');
     assert.match(gas.call('dispatchGitHub_', 'test').error, /Set GITHUB_REPO \(owner\/name\) and GITHUB_TOKEN/);
   });
@@ -756,6 +759,18 @@ describe('GitHub runner (no computer needed)', () => {
     gas.call('useComputerRunner');
     assert.equal(gas.props.get('GENERATOR_RUNNER'), undefined);
     assert.equal(gas.triggers.length, 0);
+  });
+
+  test('switching to GitHub asks again for permissions left unticked, before changing anything', () => {
+    const gas = ledger();
+    gas.props.set('GITHUB_REPO', 'owner/websitegenerator');
+    gas.props.set('GITHUB_TOKEN', 'github_pat_test_only');
+    gas.state.missingScopes = ['https://www.googleapis.com/auth/script.external_request'];
+    assert.throws(() => gas.call('useGitHubRunner'), /Authorization is required/);
+    assert.deepEqual([gas.props.get('GENERATOR_RUNNER'), gas.triggers.length, gas.fetches.length], [undefined, 0, 0]);
+    gas.state.missingScopes = []; // the owner ticked Select all
+    assert.equal(gas.call('useGitHubRunner').test.ok, true);
+    assert.equal(gas.triggers.length, 1);
   });
 
   test('a GitHub job can keep its worker alive, add notes and store the finished page in Drive', () => {
