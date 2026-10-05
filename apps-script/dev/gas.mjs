@@ -2,6 +2,8 @@
 // Node for tests and the local dashboard preview. The fake Sheets is deliberately strict: range
 // sizes are checked like Google's, and cells that are not plain text convert numbers, booleans,
 // dates and formulas the way real Sheets does, so a missing '@' format shows up as a test failure.
+// Like real Sheets, plain text ('@') stops number, date and boolean parsing but not formulas:
+// setValues() still evaluates a leading '=' and swallows a leading apostrophe.
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -103,7 +105,10 @@ class FakeSheet {
   }
   write(row, column, value) {
     const key = `${row}:${column}`;
-    const stored = this.formats.get(key) === '@' ? (value === null || value === undefined ? '' : value) : this.spreadsheet.parse(value);
+    let stored;
+    if (this.formats.get(key) !== '@' || this.spreadsheet.ignoresPlainText) stored = this.spreadsheet.parse(value);
+    else if (typeof value === 'string' && (value.startsWith('=') || value.startsWith("'"))) stored = this.spreadsheet.parse(value);
+    else stored = value === null || value === undefined ? '' : value;
     if (stored === '') this.cells.delete(key);
     else this.cells.set(key, stored);
   }
@@ -125,6 +130,7 @@ class FakeSpreadsheet {
     this.sheets = [new FakeSheet(this, 'Sheet1')];
     this.reads = 0;
     this.writes = 0;
+    this.ignoresPlainText = false; // tests: simulate a Sheet that converts values despite the '@' format
   }
   getId() { return this.id; }
   getName() { return this.name; }
@@ -176,7 +182,8 @@ export function createRuntime({ owner = 'owner@example.com', viewer = 'owner@exa
   const cache = new Map();
   const created = [];
   const context = vm.createContext({ console: sandboxConsole });
-  const makeDate = value => new context.Date(value);
+  // The sandbox's own Date, so `value instanceof Date` holds inside the .gs code.
+  const makeDate = value => new (vm.runInContext('Date', context))(value);
   const container = bound ? new FakeSpreadsheet('Website Generator Ledger', makeDate) : null;
   const allSpreadsheets = () => [container, ...created].filter(Boolean);
 

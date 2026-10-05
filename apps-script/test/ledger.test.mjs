@@ -280,6 +280,30 @@ describe('Google Sheets storage', () => {
     assert.equal(typeof snapshot.batches[0].requested_count, 'number');
   });
 
+  test('a leading "=", apostrophe or marker survives real Sheets formula handling', () => {
+    const gas = ledger();
+    const bid = batch(gas);
+    const jid = gas.call('addJob_', bid, "'Tis the Season Electric", 'https://season.example', []).id;
+    gas.call('claimJob_', bid, 'worker');
+    update(gas, jid, 'worker', 'extracting', { reason: '=SUM(A1:A9)', failure: '\u2060already marked' }, '=1+1 sounds like a formula');
+    const job = state(gas).jobs[0];
+    assert.equal(job.name, "'Tis the Season Electric");
+    assert.equal(job.reason, '=SUM(A1:A9)');
+    assert.equal(job.detail, '=1+1 sounds like a formula');
+    assert.equal(job.data.failure, '\u2060already marked');
+    const [raw] = gas.spreadsheet.getSheetByName('Jobs').records();
+    assert.equal(raw.reason, '\u2060=SUM(A1:A9)'); // stored as text behind the invisible marker, not as a formula
+    assert.equal(state(gas).events[0].message, '=1+1 sounds like a formula');
+  });
+
+  test('setup stops before storing data when Sheets converts plain-text cells', () => {
+    const gas = createRuntime();
+    gas.spreadsheet.ignoresPlainText = true;
+    assert.throws(() => gas.call('setup'), /altered plain-text test values \(\+16175550123, 2026-10-02T12:00:00\+00:00, TRUE, 007, 1e5\)/);
+    assert.deepEqual(gas.spreadsheet.getSheets().map(sheet => sheet.getName()), ['Sheet1']);
+    assert.ok(!gas.props.get('REVAMP_API_TOKEN'), 'no secrets are created when setup stops');
+  });
+
   test('a failed check writes nothing', () => {
     const gas = ledger();
     const bid = batch(gas);

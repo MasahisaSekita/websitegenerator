@@ -3,8 +3,10 @@
  *
  * Each table from tools/control.py's SQLite schema is one tab with a header row.
  * Every ledger cell uses the plain-text number format ('@'), so Sheets never turns
- * phone numbers into numbers, ISO timestamps into dates, or text that starts with
- * '=' into formulas. Mutations hold the script lock and are written only after every
+ * phone numbers into numbers or ISO timestamps into dates. Plain text does not stop a
+ * leading '=' from becoming a formula (or a leading apostrophe from being swallowed),
+ * so such values are stored behind an invisible marker and restored on read
+ * (encodeCell_). Mutations hold the script lock and are written only after every
  * check has passed — the stand-in for SQLite's BEGIN IMMEDIATE transactions.
  */
 
@@ -24,6 +26,8 @@ const TEXT_FORMAT_ = '@';
 const LOCK_WAIT_MS_ = 25000;
 const PROP_SPREADSHEET_ = 'LEDGER_SPREADSHEET_ID';
 const PROP_REVISION_ = 'LEDGER_REVISION';
+// U+2060 WORD JOINER: invisible, and never the start of a formula.
+const CELL_ESCAPE_ = '\u2060';
 
 let ledgerSpreadsheetCache_ = null;
 
@@ -240,10 +244,20 @@ function isBlankRow_(values) {
   return values.every(value => value === '' || value === null || value === undefined);
 }
 
+/** Text Sheets would alter even in a plain-text cell gets the invisible marker in front. */
+function encodeCell_(text) {
+  const first = text.charAt(0);
+  return first === '=' || first === "'" || first === CELL_ESCAPE_ ? CELL_ESCAPE_ + text : text;
+}
+
+function decodeCell_(text) {
+  return text.charAt(0) === CELL_ESCAPE_ ? text.slice(1) : text;
+}
+
 function encodeRow_(name, row) {
   return TABLES_[name].columns.map(column => {
     const value = row[column];
-    const text = value === null || value === undefined ? '' : String(value);
+    const text = encodeCell_(value === null || value === undefined ? '' : String(value));
     if (text.length > CELL_LIMIT_) {
       throw new LedgerError_(`${name}.${column} is too large for a Google Sheets cell (${CELL_LIMIT_} characters maximum).`);
     }
@@ -259,7 +273,7 @@ function decodeRow_(name, values) {
     let value = values[index];
     // Cells are plain text, but tolerate a cell someone reformatted by hand.
     if (value instanceof Date) value = value.toISOString().replace(/\.\d{3}Z$/, '+00:00');
-    value = value === null || value === undefined ? '' : String(value);
+    value = decodeCell_(value === null || value === undefined ? '' : String(value));
     if (integers.indexOf(column) >= 0) row[column] = parseInt(value, 10) || 0;
     else if (nullable.indexOf(column) >= 0 && value === '') row[column] = null;
     else row[column] = value;
@@ -323,15 +337,15 @@ function ensureLedgerSheets_(spreadsheet) {
   if (placeholder && placeholder.getLastRow() === 0 && spreadsheet.getSheets().length > 1) spreadsheet.deleteSheet(placeholder);
 }
 
-/** Confirms this account's Sheets keep plain-text cells literal before any real data is stored. */
+/** Confirms values survive this account's Sheets exactly, the way the ledger writes them, before any real data is stored. */
 function verifyPlainTextCells_(spreadsheet) {
-  const probe = ['+16175550123', '2026-10-02T12:00:00+00:00', '=1+1', 'TRUE', '007', '1e5', '{"a":1}'];
+  const probe = ['+16175550123', '2026-10-02T12:00:00+00:00', '=1+1', "'quoted", 'TRUE', '007', '1e5', '{"a":1}'];
   const sheet = spreadsheet.insertSheet('_ledger_check');
   try {
     const range = sheet.getRange(1, 1, 1, probe.length);
-    range.setNumberFormat(TEXT_FORMAT_).setValues([probe]);
+    range.setNumberFormat(TEXT_FORMAT_).setValues([probe.map(encodeCell_)]);
     SpreadsheetApp.flush();
-    const stored = range.getValues()[0];
+    const stored = range.getValues()[0].map(value => (typeof value === 'string' ? decodeCell_(value) : value));
     const changed = probe.filter((value, index) => stored[index] !== value);
     if (changed.length) {
       throw new LedgerError_('Google Sheets altered plain-text test values (' + changed.join(', ') + '). The ledger needs literal text cells, so setup stopped before storing data.');
