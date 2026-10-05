@@ -6,7 +6,7 @@
  * API (REVAMP_API_TOKEN) to find targets for queued batches, build the requested websites, upload them
  * to JetAI, store each finished page in Drive (save-site) and report progress. A 10-minute trigger
  * re-sends the start request when work is waiting and no job has reported for a while; the workflow's
- * hourly schedule is the last safety net.
+ * 6-hourly schedule is the last safety net.
  *
  * Script properties:
  *   GENERATOR_RUNNER  'github', set by useGitHubRunner(); otherwise a computer runs tools/site_runner.py watch

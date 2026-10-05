@@ -205,9 +205,21 @@ class SiteRunnerTests(unittest.TestCase):
                 folder = Path(appdata) / 'Claude' / 'claude-code' / version / 'abc123'
                 folder.mkdir(parents=True)
                 (folder / 'claude.exe').write_bytes(b'')
-            with patch.dict(os.environ, {'CLAUDE_CLI': '', 'APPDATA': appdata}), patch.object(site_runner.shutil, 'which', return_value=None), \
+            with patch.dict(os.environ, {'CLAUDE_CLI': '', 'APPDATA': appdata, 'LOCALAPPDATA': appdata}), \
+                    patch.object(site_runner.shutil, 'which', return_value=None), \
                     patch.object(site_runner.Path, 'home', return_value=Path(appdata) / 'home'):
                 self.assertIn('2.1.286', site_runner.find_claude())
+
+    def test_claude_is_found_in_the_packaged_desktop_app(self):
+        # The Store/MSIX desktop app keeps "Roaming" inside its package folder, invisible at %APPDATA%.
+        with tempfile.TemporaryDirectory() as local:
+            folder = Path(local) / 'Packages' / 'Claude_pzs8sxrjxfjjc' / 'LocalCache' / 'Roaming' / 'Claude' / 'claude-code' / '2.1.286' / 'abc123'
+            folder.mkdir(parents=True)
+            (folder / 'claude.exe').write_bytes(b'')
+            with patch.dict(os.environ, {'CLAUDE_CLI': '', 'APPDATA': str(Path(local) / 'Roaming'), 'LOCALAPPDATA': local}), \
+                    patch.object(site_runner.shutil, 'which', return_value=None), \
+                    patch.object(site_runner.Path, 'home', return_value=Path(local) / 'home'):
+                self.assertEqual(site_runner.find_claude(), str(folder / 'claude.exe'))
 
 
     # -- Finding targets and the GitHub run ---------------------------------------------------

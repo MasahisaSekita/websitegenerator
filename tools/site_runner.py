@@ -168,6 +168,9 @@ def find_claude():
     if appdata:
         candidates += glob.glob(os.path.join(appdata, 'Claude', 'claude-code', '*', '*', 'claude.exe'))
         candidates += glob.glob(os.path.join(appdata, 'Claude', 'claude-code', '*', 'claude.exe'))
+    local = os.environ.get('LOCALAPPDATA')
+    if local:  # the packaged (MSIX) desktop app: its AppData lives inside its package folder
+        candidates += glob.glob(os.path.join(local, 'Packages', 'Claude_*', 'LocalCache', 'Roaming', 'Claude', 'claude-code', '*', '*', 'claude.exe'))
     home = Path.home()
     candidates += [str(p) for p in (home / '.local' / 'bin' / 'claude', home / '.local' / 'bin' / 'claude.exe', home / '.claude' / 'local' / 'claude')]
     candidates += glob.glob(str(home / 'Library' / 'Application Support' / 'Claude' / 'claude-code' / '*' / 'claude'))
