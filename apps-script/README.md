@@ -113,12 +113,69 @@ The dashboard shows:
 
 Light and dark themes follow your system, and the toggle in the top bar overrides it.
 
+## Run on GitHub (no computer needed)
+
+This works like Creator Lab's runner. Apps Script takes the orders: Generate presses, websites you add, and new batches. It then starts a job on GitHub Actions right away. The job:
+
+- finds targets for new batches;
+- builds the requested websites;
+- uploads each one to JetAI as a draft;
+- saves each finished page in your Google Drive, in a folder called *Website Generator websites*;
+- reports progress to the dashboard.
+
+Nothing has to run on your computer.
+
+1. **Put the repository on GitHub and make it private.**
+   - The workflow is `.github/workflows/website-generator.yml`; commit it with the rest of the code.
+   - The runner's logs show only job IDs, but Actions logs of public repositories are public. Use **Settings → General → Change visibility**.
+   - Private repositories get 2,000 free Actions minutes a month. A website takes roughly 5–15 minutes, and a run with nothing to do takes seconds.
+2. **Add the repository secrets.** In the repository, open **Settings → Secrets and variables → Actions → New repository secret**:
+
+   | Secret | Value |
+   |---|---|
+   | `REVAMP_SHEETS_URL` | The web app's `/exec` address, the same as in `.env` |
+   | `REVAMP_SHEETS_TOKEN` | The agent API token, the same as in `.env` |
+   | `FIRECRAWL_API_KEY` | Your Firecrawl key |
+   | `JETAI_API_KEY` | Your JetAI key |
+   | `ANTHROPIC_API_KEY` **or** `CLAUDE_CODE_OAUTH_TOKEN` | How Claude signs in. Either an API key from console.anthropic.com (billed per token), or a token you create once with `claude setup-token` on any computer (uses your Claude subscription) |
+
+3. **Create a GitHub token for Apps Script.** It is used only to start the job.
+   1. On GitHub, open **Settings → Developer settings → Personal access tokens → Fine-grained tokens → Generate new token**.
+   2. Under **Repository access**, choose **Only select repositories** and pick this repository.
+   3. Under **Repository permissions**, set **Contents: Read and write**, then generate the token and copy it.
+4. **Give it to Apps Script.** In the Apps Script editor, open **Project Settings → Script properties** and add:
+   - `GITHUB_REPO`: `owner/name`, for example `MasahisaSekita/websitegenerator`;
+   - `GITHUB_TOKEN`: the token.
+5. **Update the code.** Add a script file named `Runner` (**+ → Script**) and paste `src/Runner.gs` into it. Paste the current `Code.gs`, `Ledger.gs`, `Index.html` and `App.html` too, then save.
+6. **Switch it on.** In the ledger spreadsheet, choose **Website Generator → Run on GitHub (no computer needed)…**.
+   - Approve the new permissions: connecting to GitHub, Drive for the website files, and the 10-minute safety trigger.
+   - It sends a test start. A *Website generator* run appears in the repository's **Actions** tab and finishes quickly, because nothing is waiting.
+7. **Deploy a new version:** **Deploy → Manage deployments → ✏️ → Version: New version → Deploy**.
+
+To test it, use **Add website** with *Generate the website now* ticked.
+- The generator panel shows **On GitHub**, then **Building 1 website** within about a minute.
+- The finished business gets a Google Drive link and a JetAI draft.
+- If GitHub refuses the start, the panel shows why (for example, a wrong token). The request waits, and the safety trigger tries again every 10 minutes.
+
+To go back to a computer, choose **Website Generator → Run on a computer instead**.
+
+**How target finding differs on GitHub.**
+- **Search:** there is no browser, so it searches with Firecrawl and keeps only results 91–100, Google's page 10, for up to six variants of the query.
+- **Screening:** it skips directories, social sites and businesses already in the ledger, and screens each remaining homepage with a Firecrawl screenshot.
+- **Judging:** Claude decides from that screenshot whether the site looks weak, following `references/qualify-prompt.md`.
+- **Limits:** it doesn't check sites on a phone, and it doesn't work through every city of a state. Queue one batch per city.
+
+**Costs per batch.**
+- Firecrawl: 20 credits per search, about 1–2 per site screened and 1–3 per website built.
+- Claude: one short check per screened site and one longer build per website.
+- GitHub: Actions minutes, as above.
+
 ## Access and security
 
 - The web app runs as you, and *Anyone* access lets the agents call it without a Google sign-in. Nobody gets data without a secret or an allowed Google account:
   - **Agents** must send `REVAMP_API_TOKEN`. It gives full ledger access, so keep it in `.env` only.
   - **The dashboard** asks for `REVAMP_DASHBOARD_KEY` unless Google identifies the visitor as you or as someone listed in `REVAMP_DASHBOARD_USERS`. To list people, open **Project Settings → Script properties** and enter comma-separated emails, or `@yourcompany.com` for a whole Workspace domain. Google only reveals a visitor's identity to "execute as me" web apps for the owner and for users in the same Workspace domain. Everyone else uses the key.
-- Dashboard viewers can read everything, queue batches, cancel batches (a reason is recorded), add websites, press Generate, and mark manual outreach as sent. Generate only records a request; the generator on your computer does the work, using your own Claude Code, Firecrawl and JetAI accounts. Viewers can't change job stages, reserve submissions or send messages.
+- Dashboard viewers can read everything, queue batches, cancel batches (a reason is recorded), add websites, press Generate, and mark manual outreach as sent. Generate only records a request, and may start the GitHub job; the generator does the work with your own Claude, Firecrawl and JetAI accounts. Viewers can't change job stages, reserve submissions or send messages, and they never see the GitHub token, which stays in Script properties.
 - Replace a secret from the sheet menu: **Replace agent API token…** or **Replace dashboard key…**.
 - The ledger tabs warn before manual edits, because editing cells directly bypasses the safety checks.
 - Setup and the secret-showing menu items refuse to run for web-app visitors.

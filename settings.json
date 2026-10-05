@@ -26,7 +26,15 @@
     "timeout_minutes": 20,
     "repair_rounds": 2,
     "scrape_pages": 3,
-    "claude_cli": ""
+    "claude_cli": "",
+    "cloud_budget_minutes": 270
+  },
+  "discovery": {
+    "country": "US",
+    "first_result": 91,
+    "results": 100,
+    "max_queries": 6,
+    "max_candidates": 30
   },
   "worker_model": "sonnet",
   "vercel_scope": "albertshineys-projects",

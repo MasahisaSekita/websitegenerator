@@ -425,6 +425,26 @@ function requestWebsite_(jobId, actor) {
   });
 }
 
+/** A worker's quiet "still working" signal during a long step: no activity line, just a fresh timestamp. */
+function touchWorker_(jobId, worker) {
+  return writeLedger_(tx => {
+    ownJob_(tx, jobId, worker);
+    const workers = tx.table('workers');
+    workers.update(workers.find(row => row.id === worker), { updated_at: nowIso_() });
+    return { id: jobId, touched: true };
+  });
+}
+
+/** One activity line for a job, or for the whole ledger (progress while finding targets). */
+function addNote_(message, jobId) {
+  requireText_(message, 'Message');
+  return writeLedger_(tx => {
+    if (jobId && !tx.table('jobs').find(row => row.id === jobId)) throw new LedgerError_('Unknown job');
+    tx.event(jobId || null, message.trim());
+    return { ok: true };
+  });
+}
+
 /** Queued businesses waiting for the generator, oldest first; also stores the generator's heartbeat. Reads without the lock. */
 function pendingRequests_(heartbeat) {
   if (heartbeat !== undefined && heartbeat !== null) {

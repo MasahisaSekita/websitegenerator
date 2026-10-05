@@ -75,6 +75,12 @@ A business that is queued and has no worker is a **target**. Both dashboards lis
 - Leave the batch `running` when its targets are registered, and report them. The operator's Generate presses finish them later.
 - A coordinator may `request` a target only when the operator asks it to.
 
+**GitHub runner (no computer needed).** With the Google Sheets ledger, the dashboard can hand this work to GitHub Actions instead of a computer; setup is in `apps-script/README.md`, "Run on GitHub".
+
+- `state` then shows `runner.mode: "github"`.
+- `.github/workflows/website-generator.yml` runs `tools/site_runner.py cloud`. That finds targets for queued dashboard batches with Firecrawl search, results 91–100 only, judges each homepage from its screenshot with `references/qualify-prompt.md`, and builds every requested website.
+- Don't run a dashboard batch in Claude Code as well unless the operator asks; a batch GitHub has started shows as `running`.
+
 ## Outreach approval
 
 Applies when `delivery` is `vercel`. Every contact-form submission needs the operator's explicit approval in the chat, given for that specific submission. Prepare first: verify the public preview, recheck the live form, save the exact message to `runs/JOB_ID/outreach.txt`, and decide the value for every field you will fill. Then ask, listing for each submission the business, the form URL, the values you will enter and the message. Collect ready submissions and ask at natural checkpoints, such as after a wave of previews is verified; background subagents keep working while you wait. The operator may approve several listed submissions in one reply; an approval covers only the submissions it lists and never carries over to later ones. Only after approval, fill the form, check it, reserve with `contact-begin`, click Submit once and record `contact-finish`. If the operator declines a submission or wants to send it personally, record [manual outreach](references/manual-outreach.md) for it. A dry-run or review-only request means no submissions.

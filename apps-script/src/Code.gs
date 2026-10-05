@@ -6,10 +6,12 @@
  *           It takes the same commands as tools/control.py and needs REVAMP_API_TOKEN.
  *   getState, queueBatch, cancelBatchFromDashboard, setManualSent, getJobActivity,
  *   requestWebsite and addTarget
- *           are the only functions the dashboard can reach with google.script.run.
- *           Each one checks the viewer first (Google account allowlist or dashboard key).
- *           A Generate button only records a request; tools/site_runner.py (the website
- *           generator, on the operator's computer) polls `requests` and builds the website.
+ *           are the dashboard's functions for google.script.run. Each one checks the viewer
+ *           first (Google account allowlist or dashboard key). Other public functions are owner
+ *           tools that refuse anyone else, or the runner trigger, which is safe to call.
+ *           Generate presses and new batches are recorded in the ledger. With the GitHub runner
+ *           (Runner.gs) they also start a GitHub Actions job; otherwise a computer running
+ *           tools/site_runner.py watch picks them up.
  *
  * Deploy as a web app that executes as you, with access "Anyone", so the agents can
  * call the API without a Google sign-in. The token and the dashboard checks keep the
@@ -70,13 +72,16 @@ function errorResponse_(error) {
 function runCommand_(command, args) {
   switch (command) {
     case 'ping': return { pong: true, server_time: nowIso_(), revision: ledgerRevision_() };
-    case 'state': return writeLedger_(tx => Object.assign(snapshot_(tx), { revision: ledgerRevision_() }));
+    case 'state': return writeLedger_(tx => Object.assign(snapshot_(tx), { revision: ledgerRevision_(), runner: runnerInfo_() }));
     case 'batch': return createBatch_(args.industry, args.city, args.count, args.mode);
     case 'add': return addJob_(args.batch, args.name, args.url, args.alias || []);
     case 'add-target': return addTarget_({ name: args.name, url: args.url, batch_id: args.batch, generate: Boolean(args.generate), aliases: args.alias || [], reason: args.reason || '' }, args.by || 'the coordinator');
     case 'claim': return claimJob_(args.batch || null, args.worker, args.job || null);
     case 'request': return requestWebsite_(args.job, args.by || 'the coordinator');
     case 'requests': return pendingRequests_(args.heartbeat);
+    case 'touch': return touchWorker_(args.job, args.worker);
+    case 'note': return addNote_(args.message, args.job || null);
+    case 'save-site': return saveSiteFile_(args.job, args.worker, args.name, args.html);
     case 'update': return updateJob_(args.job, args.worker, args.stage || null, args.detail || '', args.fields);
     case 'alias': return addAlias_(args.job, args.worker, args.identity);
     case 'capacity': return setCapacity_(args.count);
@@ -99,30 +104,37 @@ function getState(knownRevision, key) {
   const viewer = authorizeViewer_(key);
   const revision = ledgerRevision_(); // read before the snapshot so a concurrent write triggers a refetch
   // The generator heartbeat changes without a ledger write, so it travels with "unchanged" replies too.
-  if (knownRevision && String(knownRevision) === revision) return { unchanged: true, revision, generator: generatorStatus_(), server_time: nowIso_() };
+  if (knownRevision && String(knownRevision) === revision) {
+    return { unchanged: true, revision, generator: generatorStatus_(), runner: runnerInfo_(), server_time: nowIso_() };
+  }
   return readLedger_(tx => Object.assign(snapshot_(tx), {
     revision,
+    runner: runnerInfo_(),
     viewer: { email: viewer.email, method: viewer.method },
     sheet_url: ledgerSpreadsheet_().getUrl(),
   }));
 }
 
+/** Queues a batch; with the GitHub runner, GitHub starts finding its targets right away. */
 function queueBatch(input, key) {
   authorizeViewer_(key);
   const values = isPlainObject_(input) ? input : {};
-  return createBatch_(values.industry, values.city, values.requested_count, values.mode);
+  const result = createBatch_(values.industry, values.city, values.requested_count, values.mode);
+  return Object.assign(result, { runner: startRunner_('New batch') });
 }
 
 /** The Generate button: asks the website generator to build one queued business. */
 function requestWebsite(jobId, key) {
   const viewer = authorizeViewer_(key);
-  return requestWebsite_(jobId, viewerLabel_(viewer));
+  const result = requestWebsite_(jobId, viewerLabel_(viewer));
+  return Object.assign(result, { runner: startRunner_('Generate pressed') });
 }
 
 /** Adds a business by its website address, to a batch or the hand-picked list, optionally generating it right away. */
 function addTarget(input, key) {
   const viewer = authorizeViewer_(key);
-  return addTarget_(input, viewerLabel_(viewer));
+  const result = addTarget_(input, viewerLabel_(viewer));
+  return Object.assign(result, { runner: result.requested ? startRunner_('Website added') : null });
 }
 
 function cancelBatchFromDashboard(batchId, reason, key) {
@@ -238,6 +250,8 @@ function onOpen() {
     .addItem('Show dashboard key', 'showDashboardKey')
     .addSeparator()
     .addItem('Set up or repair the ledger', 'setup')
+    .addItem('Run on GitHub (no computer needed)…', 'useGitHubRunner')
+    .addItem('Run on a computer instead', 'useComputerRunner')
     .addItem('Replace agent API token…', 'rotateApiToken')
     .addItem('Replace dashboard key…', 'rotateDashboardKey')
     .addToUi();

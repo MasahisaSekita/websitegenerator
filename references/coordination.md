@@ -40,6 +40,8 @@ Start subagents with the Agent tool (general-purpose type) in the background, pa
 - A failed build returns the job to the queue with the reason as its detail, and is not retried by itself.
 - It needs a free ledger worker slot; when capacity is full, requests wait.
 - Don't claim or update a job that a `generator-…` worker owns. Coordinator claims and generator claims never collide, because claims are atomic.
+- With the GitHub runner (`runner.mode: "github"` in the Sheets `state`), GitHub Actions also finds targets for queued dashboard batches (`site_runner.py cloud`) and marks them `running`. Leave those batches to it unless the operator asks otherwise.
+- `touch --job --worker` refreshes a worker's timestamp without an activity line, and `note --message [--job]` adds one; the runner uses both. `save-site` (Sheets only) stores a finished page in the ledger owner's Drive.
 
 ## Browser ownership
 

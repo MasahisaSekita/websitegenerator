@@ -90,6 +90,7 @@ The `generator` section of `settings.json`:
 | `repair_rounds` | Extra passes for checker problems |
 | `scrape_pages` | Pages read per business when no evidence exists |
 | `claude_cli` | Path to the Claude Code CLI. When empty, it uses `claude` on PATH or the copy bundled with the Claude desktop app |
+| `cloud_budget_minutes` | On GitHub, stop starting new work after this many minutes (the job's limit is 300) |
 
 Headless Claude Code runs restricted, with these flags:
 
@@ -98,6 +99,29 @@ Headless Claude Code runs restricted, with these flags:
 - `--permission-prompts none`: anything that would need approval is refused.
 
 The page writer reads untrusted scraped text, so it gets no shell, web access or connectors. It must be signed in once with `claude auth login`, or be given `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` in the environment. `python3 tools/site_runner.py doctor` checks everything without changing anything.
+
+## On GitHub Actions
+
+`.github/workflows/website-generator.yml` runs everything above without a computer; the Apps Script dashboard starts it (see `apps-script/README.md`, "Run on GitHub").
+
+1. `site_runner.py pending` checks for work, so an empty run ends in seconds.
+2. `site_runner.py cloud` finds targets for queued dashboard batches, then builds every requested website.
+3. Finished pages go to JetAI and to the ledger owner's Google Drive (`save-site`). `site_file` then holds the Drive link, because GitHub's machine is wiped after each run.
+4. Claude Code signs in with the `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` secret.
+
+Logs show job IDs, not business names.
+
+Target finding there is `tools/discover.py`, with these settings under `discovery`:
+
+| Setting | Meaning |
+|---|---|
+| `first_result` | First search position used, 91 = Google's page 10 (the manual workflow's rule) |
+| `results` | Results requested per search (Firecrawl's maximum is 100; 2 credits per 10) |
+| `max_queries` | Query variants tried per batch |
+| `max_candidates` | Websites screened per batch at most |
+| `country` | Search country, and the country assumed for phone numbers without a + prefix |
+
+Directories, social sites and businesses already in the ledger are skipped before anything is scraped.
 
 ## Legacy template mode
 

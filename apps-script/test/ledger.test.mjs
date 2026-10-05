@@ -396,7 +396,7 @@ describe('agent API (doPost)', () => {
     assert.equal(run('update', { job: job.id, worker: 'builder-1', stage: 'deploying' }).error, 'Invalid stage transition');
     assert.deepEqual(run('capacity', { count: 4 }).result, { max_workers: 4 });
     const snapshot = run('state', {}).result;
-    assert.deepEqual(Object.keys(snapshot).sort(), ['batches', 'events', 'generator', 'jobs', 'revision', 'server_time', 'settings', 'workers']);
+    assert.deepEqual(Object.keys(snapshot).sort(), ['batches', 'events', 'generator', 'jobs', 'revision', 'runner', 'server_time', 'settings', 'workers']);
     assert.equal(snapshot.settings.max_workers, 4);
     assert.equal(snapshot.batches[0].active_count, 1);
     assert.match(run('nope', {}).error, /Unknown command/);
@@ -495,14 +495,15 @@ describe('security and setup', () => {
   test('google.script.run can reach only the intended functions', () => {
     const gas = ledger();
     assert.deepEqual(gas.publicFunctions().sort(), [
-      'addTarget', 'cancelBatchFromDashboard', 'doGet', 'doPost', 'getJobActivity', 'getState', 'onEdit', 'onOpen',
+      'addTarget', 'cancelBatchFromDashboard', 'checkGitHubRunner', 'doGet', 'doPost', 'getJobActivity', 'getState', 'onEdit', 'onOpen',
       'queueBatch', 'requestWebsite', 'rotateApiToken', 'rotateDashboardKey', 'setManualSent', 'setup', 'showApiToken', 'showDashboardKey',
+      'useComputerRunner', 'useGitHubRunner',
     ]);
   });
 
   test('owner tools refuse web-app visitors', () => {
     const gas = ledger();
-    for (const name of ['setup', 'showApiToken', 'showDashboardKey', 'rotateApiToken', 'rotateDashboardKey']) {
+    for (const name of ['setup', 'showApiToken', 'showDashboardKey', 'rotateApiToken', 'rotateDashboardKey', 'useGitHubRunner', 'useComputerRunner']) {
       assert.throws(() => gas.as('', name), /Apps Script editor/, name);
       assert.throws(() => gas.as('teammate@team.example', name), /Apps Script editor/, name);
     }
@@ -666,5 +667,116 @@ describe('Generate buttons, target lists and the website generator', () => {
     const again = gas.as(OWNER, 'getState', first.revision, '');
     assert.equal(again.unchanged, true);
     assert.equal(again.generator.note, 'Claude Code is not signed in');
+  });
+});
+
+describe('GitHub runner (no computer needed)', () => {
+  function github() {
+    const gas = ledger();
+    gas.props.set('GENERATOR_RUNNER', 'github');
+    gas.props.set('GITHUB_REPO', 'owner/websitegenerator');
+    gas.props.set('GITHUB_TOKEN', 'github_pat_test_only');
+    return gas;
+  }
+  const minutesAgo = minutes => new Date(Date.now() - minutes * 60000).toISOString().replace(/\.\d{3}Z$/, '+00:00');
+
+  test('Generate presses, new batches and added websites start the GitHub job', () => {
+    const gas = github();
+    const jid = add(gas, batch(gas));
+    const pressed = gas.as(OWNER, 'requestWebsite', jid, '');
+    assert.equal(pressed.runner.ok, true);
+    const [call] = gas.fetches;
+    assert.equal(call.url, 'https://api.github.com/repos/owner/websitegenerator/dispatches');
+    assert.equal(call.params.method, 'post');
+    assert.equal(call.params.headers.Authorization, 'Bearer github_pat_test_only');
+    assert.deepEqual(JSON.parse(call.params.payload), { event_type: 'website-generator', client_payload: { reason: 'Generate pressed' } });
+    assert.equal(gas.as(OWNER, 'queueBatch', { industry: 'Roofers', city: 'Denver, CO', requested_count: 3 }, '').runner.ok, true);
+    assert.equal(JSON.parse(gas.fetches[1].params.payload).client_payload.reason, 'New batch');
+    assert.equal(gas.as(OWNER, 'addTarget', { name: 'Peak Roofing', url: 'peak.example', generate: true }, '').runner.ok, true);
+    assert.equal(gas.as(OWNER, 'addTarget', { name: 'Later Roofing', url: 'later.example' }, '').runner, null);
+    assert.equal(gas.fetches.length, 3);
+    const snapshot = gas.as(OWNER, 'getState', null, '');
+    assert.deepEqual([snapshot.runner.mode, snapshot.runner.repo, snapshot.runner.dispatch.ok], ['github', 'owner/websitegenerator', true]);
+    assert.equal(gas.as(OWNER, 'getState', snapshot.revision, '').runner.mode, 'github');
+    assert.ok(!JSON.stringify(snapshot).includes('github_pat_test_only'), 'the GitHub token never reaches the dashboard');
+  });
+
+  test('a failed start is reported, never thrown, and the request waits', () => {
+    const gas = github();
+    gas.state.fetchReply = () => ({ code: 401, body: '{"message":"Bad credentials"}' });
+    const jid = add(gas, batch(gas));
+    const pressed = gas.as(OWNER, 'requestWebsite', jid, '');
+    assert.equal(pressed.runner.ok, false);
+    assert.match(pressed.runner.error, /HTTP 401\): check GITHUB_TOKEN and GITHUB_REPO/);
+    assert.ok(state(gas).jobs[0].data.generate_requested_at);
+    assert.match(gas.as(OWNER, 'getState', null, '').runner.dispatch.error, /HTTP 401/);
+    gas.state.fetchReply = () => ({ throws: 'Address unavailable' });
+    assert.match(gas.call('dispatchGitHub_', 'test').error, /Could not reach GitHub: Address unavailable/);
+    gas.props.delete('GITHUB_TOKEN');
+    assert.match(gas.call('dispatchGitHub_', 'test').error, /Set GITHUB_REPO \(owner\/name\) and GITHUB_TOKEN/);
+  });
+
+  test('the computer runner sends nothing to GitHub', () => {
+    const gas = ledger();
+    const jid = add(gas, batch(gas));
+    assert.equal(gas.as(OWNER, 'requestWebsite', jid, '').runner, null);
+    assert.equal(gas.fetches.length, 0);
+    assert.equal(gas.as(OWNER, 'getState', null, '').runner.mode, 'local');
+    assert.match(gas.call('checkGitHubRunner').skipped, /computer runner/);
+  });
+
+  test('the safety check re-sends a start only when work waits and no job reported recently', () => {
+    const gas = github();
+    assert.match(gas.call('checkGitHubRunner').skipped, /nothing is waiting/);
+    batch(gas); // a queued batch is waiting for its targets
+    assert.equal(gas.call('checkGitHubRunner').ok, true);
+    assert.equal(JSON.parse(gas.fetches[0].params.payload).client_payload.reason, 'Safety check: work is waiting');
+    assert.match(gas.call('checkGitHubRunner').skipped, /started recently/);
+    gas.props.set('GENERATOR_DISPATCH', JSON.stringify({ at: minutesAgo(11), ok: true }));
+    gas.props.set('GENERATOR_STATUS', JSON.stringify({ host: 'GitHub Actions', ready: true, seen_at: minutesAgo(1) }));
+    assert.match(gas.call('checkGitHubRunner').skipped, /a job is running/);
+    gas.props.set('GENERATOR_STATUS', JSON.stringify({ host: 'GitHub Actions', ready: true, seen_at: minutesAgo(7) }));
+    assert.equal(gas.call('checkGitHubRunner').ok, true);
+    assert.equal(gas.fetches.length, 2);
+  });
+
+  test('switching runners sets the mode, keeps one trigger and tests the start', () => {
+    const gas = ledger();
+    let result = gas.call('useGitHubRunner');
+    assert.deepEqual(plain(result.missing), ['GITHUB_REPO', 'GITHUB_TOKEN']);
+    assert.equal(gas.props.get('GENERATOR_RUNNER'), 'github');
+    assert.deepEqual(gas.triggers.map(item => [item.handler, item.minutes]), [['checkGitHubRunner', 10]]);
+    assert.equal(gas.fetches.length, 0);
+    gas.props.set('GITHUB_REPO', 'owner/websitegenerator');
+    gas.props.set('GITHUB_TOKEN', 'github_pat_test_only');
+    result = gas.call('useGitHubRunner');
+    assert.equal(result.test.ok, true);
+    assert.equal(gas.triggers.length, 1);
+    assert.ok(gas.logs.some(line => /New work now goes to GitHub Actions/.test(line)));
+    gas.call('useComputerRunner');
+    assert.equal(gas.props.get('GENERATOR_RUNNER'), undefined);
+    assert.equal(gas.triggers.length, 0);
+  });
+
+  test('a GitHub job can keep its worker alive, add notes and store the finished page in Drive', () => {
+    const gas = github();
+    const jid = add(gas, batch(gas));
+    gas.call('runCommand_', 'claim', { job: jid, worker: 'generator-1' });
+    const eventsBefore = state(gas).events.length;
+    assert.equal(gas.call('runCommand_', 'touch', { job: jid, worker: 'generator-1' }).touched, true);
+    assert.equal(state(gas).events.length, eventsBefore, 'touching writes no activity line');
+    assert.throws(() => gas.call('runCommand_', 'touch', { job: jid, worker: 'someone-else' }), /does not own/);
+    gas.call('runCommand_', 'note', { message: 'Plumbers · Boston: searched "plumbers Boston".' });
+    assert.equal(state(gas).events[0].message, 'Plumbers · Boston: searched "plumbers Boston".');
+    assert.throws(() => gas.call('runCommand_', 'note', { message: 'x', job: 'site-missing' }), /Unknown job/);
+    const first = gas.call('runCommand_', 'save-site', { job: jid, worker: 'generator-1', name: 'Bright Spark.html', html: '<!doctype html><p>v1</p>' });
+    assert.match(first.url, /^https:\/\/drive\.google\.com\/file\/d\//);
+    assert.equal(first.name, 'Bright-Spark.html');
+    const again = gas.call('runCommand_', 'save-site', { job: jid, worker: 'generator-1', name: 'Bright Spark.html', html: '<!doctype html><p>v2</p>' });
+    assert.equal(again.file_id, first.file_id);
+    const [folder] = gas.drive.folders.values();
+    assert.deepEqual([gas.drive.folders.size, folder.name, folder.files.length, folder.files[0].content], [1, 'Website Generator websites', 1, '<!doctype html><p>v2</p>']);
+    assert.throws(() => gas.call('runCommand_', 'save-site', { job: jid, worker: 'someone-else', name: 'x', html: '<p>' }), /does not own/);
+    assert.throws(() => gas.call('runCommand_', 'save-site', { job: jid, worker: 'generator-1', name: 'x', html: ' ' }), /empty/);
   });
 });

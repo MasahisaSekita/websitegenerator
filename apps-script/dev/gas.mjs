@@ -159,6 +159,44 @@ class FakeSpreadsheet {
   }
 }
 
+/** Drive as the runner uses it: one folder of website files, replaced in place when rebuilt. */
+class FakeDrive {
+  constructor() { this.folders = new Map(); }
+  createFolder(name) {
+    const folder = new FakeFolder('folder-' + crypto.randomUUID().slice(0, 8), name);
+    this.folders.set(folder.id, folder);
+    return folder;
+  }
+  getFolderById(id) {
+    if (!this.folders.has(id)) throw new GasError('No item with the given ID could be found. Possibly because you have not edited this item or you do not have permission to access it.');
+    return this.folders.get(id);
+  }
+}
+
+class FakeFolder {
+  constructor(id, name) { Object.assign(this, { id, name, files: [] }); }
+  getId() { return this.id; }
+  createFile(name, content, mimeType) {
+    const file = new FakeFile('file-' + crypto.randomUUID().slice(0, 8), name, content, mimeType);
+    this.files.push(file);
+    return file;
+  }
+  getFilesByName(name) {
+    const matches = this.files.filter(file => file.name === name);
+    let index = 0;
+    return { hasNext: () => index < matches.length, next: () => matches[index++] };
+  }
+}
+
+class FakeFile {
+  constructor(id, name, content, mimeType) { Object.assign(this, { id, name, content, mimeType }); }
+  getId() { return this.id; }
+  getName() { return this.name; }
+  getUrl() { return `https://drive.google.com/file/d/${this.id}/view?usp=drivesdk`; }
+  getSize() { return Buffer.byteLength(this.content, 'utf8'); }
+  setContent(content) { this.content = content; return this; }
+}
+
 function signedBytes(buffer) {
   return Array.from(buffer, byte => (byte > 127 ? byte - 256 : byte));
 }
@@ -181,6 +219,11 @@ export function createRuntime({ owner = 'owner@example.com', viewer = 'owner@exa
   const props = new Map();
   const cache = new Map();
   const created = [];
+  // UrlFetchApp records each request; tests set state.fetchReply to answer like GitHub would.
+  const fetches = [];
+  state.fetchReply = () => ({ code: 204, body: '' });
+  const drive = new FakeDrive();
+  const triggers = [];
   const context = vm.createContext({ console: sandboxConsole });
   // The sandbox's own Date, so `value instanceof Date` holds inside the .gs code.
   const makeDate = value => new (vm.runInContext('Date', context))(value);
@@ -257,6 +300,31 @@ export function createRuntime({ owner = 'owner@example.com', viewer = 'owner@exa
       getEffectiveUser: () => ({ getEmail: () => state.owner }),
     },
     Logger: { log: (...args) => sandboxConsole.log(...args) },
+    UrlFetchApp: {
+      fetch: (url, params = {}) => {
+        fetches.push({ url, params: JSON.parse(JSON.stringify(params)) });
+        const reply = state.fetchReply(url, params) || { code: 200, body: '' };
+        if (reply.throws) throw new GasError(reply.throws);
+        return { getResponseCode: () => reply.code, getContentText: () => reply.body || '' };
+      },
+    },
+    MimeType: { HTML: 'text/html', PLAIN_TEXT: 'text/plain', JSON: 'application/json' },
+    DriveApp: drive,
+    ScriptApp: {
+      getProjectTriggers: () => triggers.slice(),
+      deleteTrigger: trigger => { const index = triggers.indexOf(trigger); if (index >= 0) triggers.splice(index, 1); },
+      newTrigger: handler => ({
+        timeBased: () => ({
+          everyMinutes: minutes => ({
+            create: () => {
+              const trigger = { handler, minutes, getHandlerFunction: () => handler };
+              triggers.push(trigger);
+              return trigger;
+            },
+          }),
+        }),
+      }),
+    },
   });
 
   for (const file of fs.readdirSync(SRC_DIR).filter(name => name.endsWith('.gs')).sort()) {
@@ -269,6 +337,9 @@ export function createRuntime({ owner = 'owner@example.com', viewer = 'owner@exa
     props,
     cache,
     logs,
+    fetches,
+    drive,
+    triggers,
     /** The ledger spreadsheet (the bound container, or the one setup() created). */
     get spreadsheet() {
       const id = props.get('LEDGER_SPREADSHEET_ID');

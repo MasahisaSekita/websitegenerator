@@ -221,10 +221,22 @@
     ? `/local-business-revamp Find targets for the queued dashboard batch ${batch.id}: ${batch.requested_count} qualified ${batch.industry} businesses in ${batch.city}. Register them without building websites; I'll press Generate in the dashboard.`
     : `/local-business-revamp Run the queued dashboard batch ${batch.id}: ${batch.requested_count} completed websites for ${batch.industry} in ${batch.city}.`);
 
+  const cloudRunner = () => Boolean(data && data.runner && data.runner.mode === 'github');
+
   /** The website generator (tools/site_runner.py) reports a heartbeat while it polls the ledger. */
   function generatorState() {
     const status = data && data.generator && typeof data.generator === 'object' ? data.generator : null;
     const seen = status ? Date.parse(status.seen_at) : NaN;
+    if (cloudRunner()) {
+      // GitHub Actions runs only while there is work, so "not connected" is normal between jobs.
+      const dispatch = data.runner.dispatch && typeof data.runner.dispatch === 'object' ? data.runner.dispatch : null;
+      const live = status && Number.isFinite(seen) && now() - seen <= 90000;
+      const running = live && Array.isArray(status.running) ? status.running.length : 0;
+      if (live && !status.ready) return { tone: 'manual', label: 'Needs setup', online: true, cloud: true, live, note: status.note || 'The GitHub job cannot build websites yet.' };
+      if (live) return { tone: 'sent', label: running ? `Building ${plural(running, 'website')}` : 'Working on GitHub', online: true, ready: true, cloud: true, live, note: `A GitHub Actions job is running · builds up to ${status.max_parallel || 2} at a time.` };
+      if (dispatch && dispatch.ok === false) return { tone: 'attention', label: "Can't start on GitHub", online: true, cloud: true, live, note: dispatch.error || 'GitHub did not start the job.' };
+      return { tone: 'sent', label: 'On GitHub', online: true, ready: true, cloud: true, live, note: dispatch && dispatch.at ? `Starts by itself when there is work · last started ${ago(dispatch.at)}.` : 'Starts by itself when you press Generate or queue a batch.' };
+    }
     if (!status || !Number.isFinite(seen)) return { tone: 'neutral', label: 'Not running', online: false, note: 'Nothing has connected yet. Start it on the computer that builds the websites.' };
     if (now() - seen > 90000) return { tone: 'neutral', label: 'Offline', online: false, note: `Last seen ${ago(status.seen_at)}${status.host ? ' on ' + status.host : ''}. Start it again to build requested websites.` };
     if (!status.ready) return { tone: 'manual', label: 'Needs setup', online: true, note: status.note || 'The generator cannot build websites yet.' };
@@ -322,7 +334,7 @@
       ? `Businesses added from the dashboard · ${batch.completed_count} finished`
       : `${batch.city} · queued ${shortDate(batch.created_at)} · ${batch.completed_count} of ${batch.requested_count} finished${batchMode(batch) === 'targets' ? ' · targets list' : ''}`;
     const actions = [`<button type="button" class="btn btn-secondary btn-sm" data-add-website="${esc(batch.id)}" data-key="scope-add">${icon('globe')}Add website</button>`];
-    if (['queued', 'running'].includes(batch.status) && !isHandPicked(batch)) actions.push(`<button type="button" class="btn btn-secondary btn-sm" data-copy-prompt="${esc(batch.id)}" data-key="scope-prompt">${icon('terminal')}Copy run prompt</button>`);
+    if (['queued', 'running'].includes(batch.status) && !isHandPicked(batch) && !cloudRunner()) actions.push(`<button type="button" class="btn btn-secondary btn-sm" data-copy-prompt="${esc(batch.id)}" data-key="scope-prompt">${icon('terminal')}Copy run prompt</button>`);
     if (['queued', 'running', 'blocked'].includes(batch.status)) actions.push(`<button type="button" class="btn btn-ghost btn-sm" data-cancel-batch="${esc(batch.id)}" data-key="scope-cancel">Cancel batch</button>`);
     actions.push(`<button type="button" class="btn btn-ghost btn-sm" data-set-batch="all" data-key="scope-all">${icon('x')}All batches</button>`);
     patch($('#scope-actions'), actions.join(''));
@@ -333,11 +345,20 @@
     const requested = data.jobs.filter(job => job.stage === 'queued' && requestedAt(job)).length;
     $('#generator-note').textContent = requested ? `${requested} requested` : '';
     const command = `<div class="gen-cmd"><code>${esc(GENERATOR_COMMAND)}</code><button type="button" class="icon-btn icon-btn-sm" data-copy-value="${esc(GENERATOR_COMMAND)}" data-copy-label="Command" aria-label="Copy the command" title="Copy the command" data-key="gen-copy">${icon('copy')}</button></div>`;
+    const actions = state.cloud && data.runner.repo && /^[\w.-]+\/[\w.-]+$/.test(data.runner.repo) ? safeUrl(`https://github.com/${data.runner.repo}/actions`) : null;
     patch($('#generator'), `<div class="gen-status" data-tone="${state.tone}"><span class="gen-dot" aria-hidden="true"></span><b>${esc(state.label)}</b></div>
       <p class="gen-note">${esc(state.note)}</p>
       ${state.online ? '' : `${command}<p class="gen-hint">Run it from the project folder on the computer where Claude Code is signed in, or double-click <b>Start Generator.bat</b>. Generate buttons queue up until it runs.</p>`}
+      ${state.cloud ? `<p class="gen-hint">No computer needed: GitHub Actions finds targets and builds websites.${actions ? ` <a href="${esc(actions)}" target="_blank" rel="noopener noreferrer">See the runs on GitHub</a>.` : ''}</p>` : ''}
       ${state.online && !state.ready ? `<p class="gen-hint">Requests wait and start automatically once this is fixed.</p>` : ''}`);
     const notice = $('#generator-notice');
+    if (state.cloud && requested && !state.live) {
+      // Started on GitHub but not picked up yet (it usually takes under a minute), or GitHub refused.
+      notice.hidden = false;
+      notice.setAttribute('data-tone', state.ready ? 'working' : 'attention');
+      patch(notice, `<span class="notice-icon">${icon('sparkle')}</span><div class="notice-body"><b>${plural(requested, 'website')} ${state.ready ? 'starting on GitHub' : 'waiting: GitHub did not start'}.</b><p>${esc(state.ready ? 'GitHub Actions usually picks new work up within a minute. If a start gets lost, it is sent again within 10 minutes.' : state.note + ' Requests wait until it is fixed.')}</p></div>`);
+      return;
+    }
     if (!requested || state.ready) {
       notice.hidden = true;
       patch(notice, '');
@@ -358,6 +379,10 @@
     }
     notice.hidden = false;
     notice.setAttribute('data-tone', 'working');
+    if (cloudRunner()) {
+      patch(notice, `<span class="notice-icon">${icon('clock')}</span><div class="notice-body"><b>${plural(waiting.length, 'batch', 'batches')} starting on GitHub.</b><p>GitHub Actions searches for targets, checks each website and builds the ones that qualify. Progress appears here as it happens.</p></div>`);
+      return;
+    }
     const chips = waiting.slice(0, 3).map(batch => `<button type="button" class="pill" data-copy-prompt="${esc(batch.id)}" data-key="notice-${esc(batch.id)}" title="Copy the Claude Code prompt for this batch"><span>${esc(batchName(batch))}</span>${icon('copy')}</button>`).join('');
     patch(notice, `<span class="notice-icon">${icon('clock')}</span><div class="notice-body"><b>${plural(waiting.length, 'batch', 'batches')} waiting for the coordinator.</b><p>Nothing runs until you start it in Claude Code. Copy a run prompt and paste it into Claude Code, opened in the project folder.</p></div><div class="notice-actions">${chips}</div>`);
   }
@@ -703,7 +728,8 @@
       contactForm ? ['Contact form', `<a href="${esc(contactForm)}" target="_blank" rel="noopener noreferrer">${esc(shortUrl(contactForm))}</a>`] : null,
       ['Batch', batch ? `<button type="button" class="link-btn" data-set-batch="${esc(batch.id)}" data-close-drawer data-key="details-batch">${esc(batchName(batch))}</button>` : esc(job.batch_id)],
       ['Worker', job.worker ? `<code>${esc(job.worker)}</code>` : 'Unassigned'],
-      typeof dataOf(job).site_file === 'string' && dataOf(job).site_file ? ['Website file', `<span class="file-path"><code>${esc(dataOf(job).site_file)}</code><button type="button" class="icon-btn icon-btn-sm" data-copy-value="${esc(dataOf(job).site_file)}" data-copy-label="File path" aria-label="Copy file path" title="Copy file path" data-key="copy-file">${icon('copy')}</button></span>`] : null,
+      typeof dataOf(job).site_file === 'string' && safeUrl(dataOf(job).site_file) ? ['Website file', `<a href="${esc(safeUrl(dataOf(job).site_file))}" target="_blank" rel="noopener noreferrer">Open in Google Drive ${icon('external')}</a>`] : null,
+      typeof dataOf(job).site_file === 'string' && dataOf(job).site_file && !safeUrl(dataOf(job).site_file) ? ['Website file', `<span class="file-path"><code>${esc(dataOf(job).site_file)}</code><button type="button" class="icon-btn icon-btn-sm" data-copy-value="${esc(dataOf(job).site_file)}" data-copy-label="File path" aria-label="Copy file path" title="Copy file path" data-key="copy-file">${icon('copy')}</button></span>`] : null,
       ['Last change', esc(stamp(job.updated_at))],
       job.data_error ? ['Ledger warning', esc(job.data_error)] : null,
     ].filter(Boolean);
@@ -774,8 +800,10 @@
       if (!result.unchanged) {
         applyState(result);
         lastFullFetch = Date.now();
-      } else if (data && JSON.stringify(result.generator || null) !== JSON.stringify(data.generator || null)) {
+      } else if (data && JSON.stringify([result.generator || null, result.runner || null]) !== JSON.stringify([data.generator || null, data.runner || null])) {
         data.generator = result.generator || null;
+        data.runner = result.runner || data.runner || null;
+        renderNotice();
         renderGenerator();
         if ($('#drawer').open) renderDrawer();
       }
@@ -805,6 +833,7 @@
       workers: Array.isArray(next.workers) ? next.workers : [],
       settings: next.settings || {},
       generator: next.generator || null,
+      runner: next.runner || null,
       viewer: next.viewer || {},
       sheet_url: next.sheet_url || '',
     };
@@ -996,6 +1025,13 @@
       const batch = { id: result.id, industry, city, requested_count: result.requested_count, mode: result.mode || mode };
       $('#batch-done-summary').textContent = `${industry} · ${city} · ${batchMode(batch) === 'targets' ? plural(result.requested_count, 'target') + ' to find' : plural(result.requested_count, 'website')}`;
       $('#batch-prompt').textContent = runPrompt(batch);
+      const onGitHub = Boolean(result.runner) || cloudRunner();
+      $('#batch-next').hidden = onGitHub;
+      $('#copy-prompt').hidden = onGitHub;
+      $('#batch-cloud').hidden = !onGitHub;
+      $('#batch-cloud').textContent = result.runner && result.runner.ok === false
+        ? `Queued, but GitHub did not start: ${result.runner.error} It is retried automatically.`
+        : 'Started on GitHub: it finds the targets and builds the websites. Progress appears on this dashboard as it happens; no computer needs to stay on.';
       batchForm.hidden = true;
       $('#batch-done').hidden = false;
       $('#copy-prompt').focus();

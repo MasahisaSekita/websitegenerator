@@ -129,6 +129,12 @@ def run(a):
         return call('request', {'job': a.job, 'by': a.by})
     if a.cmd == 'requests':
         return call('requests', {'heartbeat': json.loads(a.heartbeat) if a.heartbeat else None})
+    if a.cmd == 'touch':
+        return call('touch', {'job': a.job, 'worker': a.worker})
+    if a.cmd == 'note':
+        return call('note', {'message': a.message, 'job': a.job})
+    if a.cmd == 'save-site':
+        return call('save-site', {'job': a.job, 'worker': a.worker, 'name': a.name or a.file.name, 'html': read_text(a.file)}, attempts=1)
     if a.cmd == 'update':
         fields = json.loads(read_text(a.fields)) if a.fields else None
         return call('update', {'job': a.job, 'worker': a.worker, 'stage': a.stage, 'detail': a.detail, 'fields': fields})
@@ -164,6 +170,9 @@ def parser():
     s = sub.add_parser('claim'); s.add_argument('--batch'); s.add_argument('--job'); s.add_argument('--worker', required=True)
     s = sub.add_parser('request', help='Ask the website generator to build a queued business'); s.add_argument('--job', required=True); s.add_argument('--by', default='the coordinator')
     s = sub.add_parser('requests', help='List Generate requests (the website generator polls this)'); s.add_argument('--heartbeat', help='JSON status of the generator to record')
+    s = sub.add_parser('touch', help='Keep a running worker from looking stalled during a long step'); s.add_argument('--job', required=True); s.add_argument('--worker', required=True)
+    s = sub.add_parser('note', help='Add one activity line'); s.add_argument('--message', required=True); s.add_argument('--job')
+    s = sub.add_parser('save-site', help="Store a finished website file in the ledger owner's Google Drive"); s.add_argument('--job', required=True); s.add_argument('--worker', required=True); s.add_argument('--file', type=Path, required=True); s.add_argument('--name')
     s = sub.add_parser('update'); s.add_argument('--job', required=True); s.add_argument('--worker', required=True); s.add_argument('--stage', choices=STAGES); s.add_argument('--detail', default=''); s.add_argument('--fields', type=Path)
     s = sub.add_parser('alias'); s.add_argument('--job', required=True); s.add_argument('--worker', required=True); s.add_argument('--identity', required=True)
     s = sub.add_parser('capacity'); s.add_argument('count', type=int, choices=range(1, 6))

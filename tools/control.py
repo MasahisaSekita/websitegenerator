@@ -190,6 +190,21 @@ def request(jid, by='the dashboard'):
         event(c, jid, f'Website requested by {by}; waiting for the website generator.')
         return {'id': jid, 'requested_at': data['generate_requested_at']}
 
+def touch(jid, worker):
+    """A worker's quiet "still working" signal during a long step: no activity line, just a fresh timestamp."""
+    with connect() as c:
+        own(c, jid, worker)
+        c.execute('UPDATE workers SET updated_at=? WHERE id=?', (now(), worker))
+        return {'id': jid, 'touched': True}
+
+def note(message, jid=None):
+    """One activity line for a job, or for the whole ledger (progress while finding targets)."""
+    if not isinstance(message, str) or not message.strip(): raise ValueError('Message is required')
+    with connect() as c:
+        if jid and not c.execute('SELECT 1 FROM jobs WHERE id=?', (jid,)).fetchone(): raise ValueError('Unknown job')
+        event(c, jid or None, message.strip())
+        return {'ok': True}
+
 def pending_requests(heartbeat=None):
     """Queued businesses waiting for the generator, oldest request first. Also records the generator's heartbeat."""
     with connect() as c:
@@ -470,6 +485,8 @@ def main():
     s=sub.add_parser('claim'); s.add_argument('--batch'); s.add_argument('--job'); s.add_argument('--worker',required=True)
     s=sub.add_parser('request',help='Ask the website generator to build a queued business'); s.add_argument('--job',required=True); s.add_argument('--by',default='the coordinator')
     s=sub.add_parser('requests',help='List Generate requests (the website generator polls this)'); s.add_argument('--heartbeat',help='JSON status of the generator to record')
+    s=sub.add_parser('touch',help='Keep a running worker from looking stalled during a long step'); s.add_argument('--job',required=True); s.add_argument('--worker',required=True)
+    s=sub.add_parser('note',help='Add one activity line'); s.add_argument('--message',required=True); s.add_argument('--job')
     s=sub.add_parser('update'); s.add_argument('--job',required=True); s.add_argument('--worker',required=True); s.add_argument('--stage',choices=STAGES); s.add_argument('--detail',default=''); s.add_argument('--fields',type=Path)
     s=sub.add_parser('alias'); s.add_argument('--job',required=True); s.add_argument('--worker',required=True); s.add_argument('--identity',required=True)
     s=sub.add_parser('capacity'); s.add_argument('count',type=int,choices=range(1,6))
@@ -490,6 +507,8 @@ def main():
         elif a.cmd=='claim': result=claim(a.batch,a.worker,a.job)
         elif a.cmd=='request': result=request(a.job,a.by)
         elif a.cmd=='requests': result=pending_requests(json.loads(a.heartbeat) if a.heartbeat else None)
+        elif a.cmd=='touch': result=touch(a.job,a.worker)
+        elif a.cmd=='note': result=note(a.message,a.job)
         elif a.cmd=='update': result=update(a.job,a.worker,a.stage,a.detail,json.loads(a.fields.read_text()) if a.fields else None)
         elif a.cmd=='contact-begin': result=contact_begin(a.job,a.worker,a.message_file.read_text(),a.form_url)
         elif a.cmd=='contact-finish': result=contact_finish(a.job,a.worker,a.status,a.evidence)

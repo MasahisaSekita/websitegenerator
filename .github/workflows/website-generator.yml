@@ -1,0 +1,54 @@
+# Website Generator on GitHub Actions: finds targets and builds websites, so no computer has to stay on.
+# Apps Script starts it the moment someone presses Generate, adds a website or queues a batch
+# (repository_dispatch, see apps-script/src/Runner.gs); its 10-minute trigger re-sends a start that
+# got lost. The schedule below is only the last safety net, and a run with nothing to do ends in seconds.
+# Setup: apps-script/README.md, "Run on GitHub (no computer needed)".
+name: Website generator
+
+on:
+  repository_dispatch:
+    types: [website-generator]
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One job at a time. Each run handles everything that is waiting, including work added while it runs.
+concurrency:
+  group: website-generator
+  cancel-in-progress: false
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    env:
+      REVAMP_SHEETS_URL: ${{ secrets.REVAMP_SHEETS_URL }}
+      REVAMP_SHEETS_TOKEN: ${{ secrets.REVAMP_SHEETS_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Check for waiting work
+        id: check
+        run: python tools/site_runner.py pending
+      - uses: actions/setup-node@v4
+        if: steps.check.outputs.work == 'true'
+        with:
+          node-version: 22
+      - name: Install Claude Code
+        if: steps.check.outputs.work == 'true'
+        run: npm install --global @anthropic-ai/claude-code@2.1.286
+      - name: Find targets and build websites
+        if: steps.check.outputs.work == 'true'
+        run: python tools/site_runner.py cloud
+        env:
+          FIRECRAWL_API_KEY: ${{ secrets.FIRECRAWL_API_KEY }}
+          JETAI_API_KEY: ${{ secrets.JETAI_API_KEY }}
+          # One of these signs Claude Code in: an Anthropic Console API key (billed per token),
+          # or a token made once with `claude setup-token` (uses a Claude subscription).
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}

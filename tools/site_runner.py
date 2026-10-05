@@ -5,14 +5,17 @@
   run --job JOB_ID                   build one queued business now, as a worker
   prepare --job JOB_ID --worker W [--evidence DIR]   scrape the current site (or reuse evidence) and write the brief
   finish --job JOB_ID --worker W     check the page, embed photos, upload it to JetAI and mark the job delivered
+  cloud                              one GitHub Actions run: find targets for queued batches, then build every request
   doctor                             check Claude Code, Firecrawl, JetAI and the ledger without changing anything
 
-`run` and `watch` start Claude Code headless (claude -p) to write runs/JOB_ID/site/index.html
+`run`, `watch` and `cloud` start Claude Code headless (claude -p) to write runs/JOB_ID/site/index.html
 following references/website-prompt.md. Claude runs restricted: file tools only, confined to the
 job folder, with no shell, web access or MCP connectors, because the scraped text it reads is
 untrusted. In the coordinator workflow a builder subagent writes the page itself and calls
 `prepare` and `finish`. The Google Sheets ledger is used when REVAMP_SHEETS_URL and
 REVAMP_SHEETS_TOKEN are set (environment or .env); otherwise data/revamp.sqlite3.
+`cloud` is what .github/workflows/website-generator.yml runs, so no computer has to stay on;
+there the finished pages are also stored in the ledger owner's Google Drive (save-site).
 """
 import argparse
 import glob
@@ -72,6 +75,15 @@ def log(message):
     print(time.strftime('[%H:%M:%S] ') + message, flush=True)
 
 
+def in_actions():
+    return os.environ.get('GITHUB_ACTIONS') == 'true'
+
+
+def label(job):
+    """Log label: GitHub Actions logs can be public, so they show job IDs, not business names."""
+    return job['id'] if in_actions() else f"{job['name']} ({job['id']})"
+
+
 # ---------------------------------------------------------------------------
 # Ledgers
 
@@ -89,6 +101,12 @@ class LocalLedger:
     def claim(self, job, worker): return self.c.claim(None, worker, job)
     def update(self, job, worker, stage=None, detail='', fields=None): return self.c.update(job, worker, stage, detail, fields)
     def recover(self, job, reason): return self.c.recover(job, reason)
+    def touch(self, job, worker): return self.c.touch(job, worker)
+    def note(self, message, job=None): return self.c.note(message, job)
+    def batch_status(self, batch, status): return self.c.batch_status(batch, status)
+    def add_target(self, name, url, batch, generate=False, by='the website generator', reason='', aliases=()):
+        return self.c.add_target(name, url, batch, generate, by, reason, aliases)
+    def save_site(self, job, worker, name, html): return None  # the file stays on this computer
 
 
 class SheetsLedger:
@@ -106,6 +124,15 @@ class SheetsLedger:
     def update(self, job, worker, stage=None, detail='', fields=None):
         return self.s.call('update', {'job': job, 'worker': worker, 'stage': stage, 'detail': detail, 'fields': fields})
     def recover(self, job, reason): return self.s.call('recover', {'job': job, 'reason': reason})
+    def touch(self, job, worker): return self.s.call('touch', {'job': job, 'worker': worker})
+    def note(self, message, job=None): return self.s.call('note', {'message': message, 'job': job})
+    def batch_status(self, batch, status): return self.s.call('batch-status', {'batch': batch, 'status': status})
+    def add_target(self, name, url, batch, generate=False, by='the website generator', reason='', aliases=()):
+        return self.s.call('add-target', {'name': name, 'url': url, 'batch': batch, 'generate': generate, 'by': by,
+                                          'reason': reason, 'alias': list(aliases)})
+    def save_site(self, job, worker, name, html):
+        """Stores the finished page in the ledger owner's Google Drive; GitHub's machine is wiped after each run."""
+        return self.s.call('save-site', {'job': job, 'worker': worker, 'name': name, 'html': html}, attempts=1)
 
 
 def default_ledger():
@@ -153,16 +180,24 @@ def find_claude():
     return max(existing, key=lambda p: (version(p), Path(p).stat().st_mtime)) if existing else None
 
 
+CLAUDE_KEYS = ('ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN')
+
+
 def child_env():
     env = os.environ.copy()
     for key in ('CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_SSE_PORT'):
         env.pop(key, None)  # a nested Claude Code session started from another one
+    for key in CLAUDE_KEYS:
+        if not env.get(key):
+            env.pop(key, None)  # an unset GitHub secret arrives as an empty variable
     return env
 
 
 def claude_ready(cli):
-    if os.environ.get('ANTHROPIC_API_KEY') or os.environ.get('CLAUDE_CODE_OAUTH_TOKEN'):
+    if any(os.environ.get(key) for key in CLAUDE_KEYS):
         return True, ''
+    if in_actions():
+        return False, 'Add an ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN secret to the GitHub repository so Claude Code can sign in.'
     try:
         out = subprocess.run([cli, 'auth', 'status'], capture_output=True, text=True, encoding='utf-8', errors='replace',
                              timeout=60, env=child_env(), stdin=subprocess.DEVNULL)
@@ -184,16 +219,17 @@ def preflight(upload=None, scrape=True):
         ready, message = claude_ready(cli)
         if not ready:
             problems.append(message)
+    where = 'as a GitHub secret' if in_actions() else 'in .env'
     if scrape:
         try:
             site_assets.api_key(firecrawl_env())
         except (ValueError, OSError):
-            problems.append('Set FIRECRAWL_API_KEY in .env so the generator can read business websites.')
+            problems.append(f'Set FIRECRAWL_API_KEY {where} so the generator can read business websites.')
     if upload if upload is not None else upload_enabled():
         try:
             jetai.Client()
         except jetai.JetAIError as error:
-            problems.append(str(error))
+            problems.append(str(error).replace('in .env', where))
     return problems
 
 
@@ -219,12 +255,12 @@ def compose_prompt(job, job_dir, brief, problems=None):
     return '\n'.join(lines) + '\n'
 
 
-def run_claude(job_dir, prompt, config):
+def run_claude(job_dir, prompt, config, tools=CLAUDE_TOOLS):
     cli = find_claude()
     if not cli:
         raise BuildError('Claude Code was not found on this computer')
     command = [cli, '-p', '--output-format', 'json', '--model', str(config['model']),
-               '--restricted', '--strict-mcp-config', '--tools', CLAUDE_TOOLS,
+               '--restricted', '--strict-mcp-config', '--tools', tools,
                '--permission-mode', 'acceptEdits', '--permission-prompts', 'none',
                '--no-session-persistence', '--disable-slash-commands', '--max-turns', str(int(config['max_turns']))]
     started = time.monotonic()
@@ -247,7 +283,9 @@ def run_claude(job_dir, prompt, config):
         raise BuildError(f'Claude Code stopped without a result (exit {out.returncode}): {detail[0][:300]}')
     text = str(result.get('result') or '')
     if result.get('is_error') or result.get('subtype') not in (None, 'success'):
-        if re.search(r'not logged in|/login|authenticat', text, re.I):
+        if re.search(r'not logged in|/login|authenticat|invalid api key|oauth', text, re.I):
+            if in_actions():
+                raise BuildError('Claude Code could not sign in: check the ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN secret on GitHub')
             raise BuildError(f'Claude Code is not signed in on this computer. Run once: "{cli}" auth login')
         raise BuildError('Claude Code reported a problem: ' + (text or str(result.get('subtype')))[:300])
     return {'seconds': round(time.monotonic() - started), 'turns': result.get('num_turns'),
@@ -293,8 +331,8 @@ def scrape(url, evidence, pages):
         try:
             site_assets.scrape(SimpleNamespace(url=extra[:pages - 1], out=str(evidence), max_pages=max(1, pages),
                                                env_file=env_file, refresh=False, screen=False))
-        except ValueError as error:
-            log(f'Inner pages skipped: {error}')
+        except (ValueError, OSError) as error:
+            log(f'Inner pages skipped: {error if isinstance(error, ValueError) else type(error).__name__}')
     return evidence
 
 
@@ -311,11 +349,15 @@ def prepare(ledger, job, worker, evidence=None, pages=None):
     evidence_dirs = [Path(e) for e in (evidence or [])]
     if not evidence_dirs:
         own = job_dir / 'evidence'
-        if not (own / 'scrape-manifest.json').exists():
+        # Target finding leaves only the screened homepage here; read the inner pages once (the homepage is cached).
+        if not (own / '.complete').exists():
             try:
                 scrape(job['url'], own, int(pages or generator_settings()['scrape_pages']))
-            except ValueError as error:
-                raise BuildError(f'Could not read {job["url"]}: {error}') from None
+            except (ValueError, OSError) as error:
+                if not (own / 'scrape-manifest.json').exists():
+                    raise BuildError(f'Could not read {job["url"]}: {error if isinstance(error, ValueError) else type(error).__name__}') from None
+                log(f'Using the pages read earlier: {error}')
+            (own / '.complete').write_text('', encoding='utf-8')
         evidence_dirs = [own]
     batch = next((b for b in ledger.state().get('batches', []) if b.get('id') == job.get('batch_id')), {})
     hand_picked = batch.get('industry') == 'Hand-picked websites'
@@ -327,9 +369,16 @@ def prepare(ledger, job, worker, evidence=None, pages=None):
         raise BuildError(f'Could not prepare the brief: {error}') from None
     fields = {'workspace': rel(job_dir)}
     data = job.get('data') or {}
-    if not data.get('source_urls'):
+    try:  # findings saved when the GitHub runner qualified this business
+        packet = json.loads((job_dir / 'qualification.json').read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        packet = {}
+    for key in ('qualification', 'source_urls', 'screenshots'):
+        if packet.get(key) and not data.get(key):
+            fields[key] = packet[key]
+    if not data.get('source_urls') and 'source_urls' not in fields:
         fields['source_urls'] = [p['url'] for p in brief['pages']]
-    if not data.get('screenshots') and brief['screenshots']:
+    if not data.get('screenshots') and 'screenshots' not in fields and brief['screenshots']:
         fields['screenshots'] = [rel(job_dir / s) for s in brief['screenshots']]
     photos = sum(1 for p in brief['images'] if p.get('file'))
     if stage == 'extracting':
@@ -380,6 +429,16 @@ def finish(ledger, job, worker, upload=None):
         ledger.update(job['id'], worker, None, f'Website checked ({size}); ready to deploy', fields)
         return {'ok': True, 'file': rel(out), 'next': 'deploy', 'warnings': result['warnings'], 'stats': result['stats']}
     detail = f'Website ready ({size})'
+    try:
+        saved = ledger.save_site(job['id'], worker, out.name, out.read_text(encoding='utf-8'))
+    except Exception as error:  # the file is still uploaded to JetAI below
+        saved = None
+        log(f"{label(job)}: could not store the file in Google Drive: {error}")
+    if isinstance(saved, dict) and isinstance(saved.get('url'), str) and saved['url'].startswith('https://'):
+        fields['site_file'] = saved['url']
+        detail += ', saved in Google Drive'
+    if in_actions():
+        fields.pop('workspace', None)  # GitHub's machine is wiped after the run
     if upload if upload is not None else upload_enabled():
         previous = (job.get('data') or {}).get('jetai') or {}
         try:
@@ -412,6 +471,26 @@ def upload_with_retry(job, path, prototype_id=None, attempts=3):
             time.sleep(5 * (attempt + 1))
 
 
+class KeepAlive:
+    """Touches the worker every few minutes while a long step runs, so dashboards don't call it stalled."""
+    def __init__(self, ledger, job_id, worker, every=90):
+        self.stop = threading.Event()
+        def beat():
+            while not self.stop.wait(every):
+                try:
+                    ledger.touch(job_id, worker)
+                except Exception:
+                    pass  # a missed beat only delays the next one
+        self.thread = threading.Thread(target=beat, daemon=True, name='keepalive-' + job_id)
+
+    def __enter__(self):
+        self.thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self.stop.set()
+
+
 def run_job(ledger, job_id, worker=None, upload=None):
     """Claims one queued business and builds, checks and uploads its website."""
     config = generator_settings()
@@ -419,20 +498,21 @@ def run_job(ledger, job_id, worker=None, upload=None):
     ledger.claim(job_id, worker)
     try:
         job = find_job(ledger, job_id)
-        log(f"Building {job['name']} ({job_id})")
-        prepare(ledger, job, worker)
-        job['stage'] = 'building'
-        job_dir = job_dir_for(job_id)
-        brief = json.loads((job_dir / 'brief.json').read_text(encoding='utf-8'))
-        problems, runs = None, []
-        for attempt in range(int(config['repair_rounds']) + 1):
-            runs.append(run_claude(job_dir, compose_prompt(job, job_dir, brief, problems), config))
-            result = finish(ledger, job, worker, upload)
-            if result['ok']:
-                log(f"Delivered {job['name']}: {result['file']}")
-                return result
-            problems = result['errors']
-            log(f"{job['name']}: fixing {len(problems)} problem(s)")
+        log(f"Building {label(job)}")
+        with KeepAlive(ledger, job_id, worker):
+            prepare(ledger, job, worker)
+            job['stage'] = 'building'
+            job_dir = job_dir_for(job_id)
+            brief = json.loads((job_dir / 'brief.json').read_text(encoding='utf-8'))
+            problems, runs = None, []
+            for attempt in range(int(config['repair_rounds']) + 1):
+                runs.append(run_claude(job_dir, compose_prompt(job, job_dir, brief, problems), config))
+                result = finish(ledger, job, worker, upload)
+                if result['ok']:
+                    log(f"Delivered {label(job)}")
+                    return result
+                problems = result['errors']
+                log(f"{label(job)}: fixing {len(problems)} problem(s)")
         raise BuildError(f'The page still had {len(problems)} problem(s) after {len(runs)} attempts: {problems[0]}')
     except Exception as error:
         message = str(error) if isinstance(error, (BuildError, ValueError)) else f'{type(error).__name__}: {error}'
@@ -446,13 +526,18 @@ def run_job(ledger, job_id, worker=None, upload=None):
 # ---------------------------------------------------------------------------
 # Watcher
 
-def watch(ledger=None, once=False, quiet=True, stop=None, poll=None):
-    """Builds requested websites until stopped. With once=True, handles the current requests and returns."""
+def watch(ledger=None, once=False, quiet=True, stop=None, poll=None, deadline=None):
+    """Builds requested websites until stopped. With once=True, handles the current requests and returns.
+
+    The heartbeat goes out on every poll, including while builds run, so dashboards can tell a busy
+    generator from a stopped one. No new build starts after `deadline` (a time.monotonic() value).
+    """
     ledger = ledger or default_ledger()
     config = generator_settings()
     stop = stop or threading.Event()
     poll = float(poll or config['poll_seconds'])
     limit = max(1, min(5, int(config['max_parallel'])))
+    host = 'GitHub Actions' if in_actions() else socket.gethostname()[:60]
     running, results = {}, {}
     checked, problems = 0.0, []
     if not quiet:
@@ -467,37 +552,74 @@ def watch(ledger=None, once=False, quiet=True, stop=None, poll=None):
                 log(f'{job_id}: {error}')
 
     while not stop.is_set():
+        for job_id, thread in list(running.items()):
+            if not thread.is_alive():
+                running.pop(job_id)
         if time.monotonic() - checked > 60:
             problems, checked = preflight(), time.monotonic()
             if problems and not quiet:
                 log('Waiting: ' + problems[0])
-        heartbeat = {'host': socket.gethostname()[:60], 'ready': not problems, 'max_parallel': limit,
-                     'running': list(running), 'note': problems[0] if problems else (f'Building {len(running)} website(s)' if running else 'Ready')}
+        heartbeat = {'host': host, 'ready': not problems, 'max_parallel': limit, 'running': list(running),
+                     'note': problems[0] if problems else (f'Building {len(running)} website(s)' if running else 'Ready')}
         try:
             pending = ledger.requests(heartbeat).get('requests', [])
         except Exception as error:
             if not quiet:
                 log(f'Could not read the ledger: {error}')
             pending = []
-        for item in pending:
-            if problems or len(running) >= limit:
+        late = deadline is not None and time.monotonic() > deadline
+        # One pass handles each request once; a failed build waits for a new Generate press.
+        fresh = [item for item in pending if item['id'] not in running and not (once and item['id'] in results)]
+        for item in fresh:
+            if problems or late or len(running) >= limit:
                 break
-            if item['id'] not in running:
-                thread = threading.Thread(target=work, args=(item['id'],), daemon=True, name='build-' + item['id'])
-                running[item['id']] = thread
-                thread.start()
-        if once:
-            for thread in list(running.values()):
-                thread.join()
-            running.clear()
-            if problems or not pending or all(i['id'] in results for i in pending):
-                return {'problems': problems, 'results': results}
-            continue
+            thread = threading.Thread(target=work, args=(item['id'],), daemon=True, name='build-' + item['id'])
+            running[item['id']] = thread
+            thread.start()
+        if once and not running and (problems or late or not fresh):
+            return {'problems': problems, 'results': results}
+        if once and not running:
+            continue  # more requests than build slots: start the next ones right away
         stop.wait(poll)
-        for job_id, thread in list(running.items()):
-            if not thread.is_alive():
-                running.pop(job_id)
     return {'problems': problems, 'results': results}
+
+
+def cloud(ledger=None, budget_minutes=None, finder=None):
+    """One GitHub Actions run: find targets for the queued batches, then build every requested website."""
+    if finder is None:
+        import discover as finder
+    discover = finder
+    # discover.py calls back into this module (run_claude, settings, RUNS); hand it this very module.
+    module = sys.modules.get(__name__)
+    runner = module if module is not None and getattr(module, 'cloud', None) is cloud else SimpleNamespace(**globals())
+    ledger = ledger or default_ledger()
+    if ledger.kind != 'sheets' and in_actions():
+        raise BuildError('Add the REVAMP_SHEETS_URL and REVAMP_SHEETS_TOKEN secrets on GitHub so the run can reach your ledger')
+    config = generator_settings()
+    deadline = time.monotonic() + float(budget_minutes or config.get('cloud_budget_minutes') or 270) * 60
+    summary = {'ok': True, 'batches': [], 'builds': {}, 'problems': []}
+    for _ in range(20):
+        for batch in discover.pending_batches(ledger.state()):
+            if time.monotonic() > deadline:
+                break
+            problems = preflight(upload=False)
+            if problems:
+                ledger.requests({'host': 'GitHub Actions' if in_actions() else socket.gethostname()[:60], 'ready': False, 'note': problems[0], 'running': []})
+                summary.update(ok=False, problems=problems)
+                return summary
+            summary['batches'].append(discover.discover_batch(ledger, batch, runner, deadline=deadline))
+        result = watch(ledger, once=True, deadline=deadline)
+        summary['builds'].update(result['results'])
+        if result['problems']:
+            summary.update(ok=False, problems=result['problems'])
+            return summary
+        state = ledger.state()
+        waiting = [j for j in state.get('jobs', []) if j.get('stage') == 'queued' and not j.get('worker')
+                   and (j.get('data') or {}).get('generate_requested_at') and j['id'] not in summary['builds']]
+        if time.monotonic() > deadline or not (waiting or discover.pending_batches(state)):
+            break
+    summary['ok'] = all(item.get('ok') for item in summary['builds'].values()) if summary['builds'] else True
+    return summary
 
 
 def main(argv=None):
@@ -509,6 +631,9 @@ def main(argv=None):
     s.add_argument('--evidence', action='append', default=[], help='Existing Firecrawl evidence folder (repeatable); scrapes when omitted')
     s.add_argument('--pages', type=int)
     s = sub.add_parser('finish'); s.add_argument('--job', required=True); s.add_argument('--worker', required=True); s.add_argument('--no-upload', action='store_true')
+    s = sub.add_parser('cloud', help='One GitHub Actions run: find targets for queued batches, then build every request')
+    s.add_argument('--budget-minutes', type=float, help='Stop starting new work after this long (default generator.cloud_budget_minutes)')
+    sub.add_parser('pending', help='Is anything waiting? (sets work=true|false for the next GitHub Actions steps)')
     sub.add_parser('doctor')
     args = parser.parse_args(argv)
     try:
@@ -517,6 +642,28 @@ def main(argv=None):
                 result = watch(once=args.once, quiet=False)
             except KeyboardInterrupt:
                 return 0
+        elif args.cmd == 'cloud':
+            result = cloud(budget_minutes=args.budget_minutes)
+            for problem in result.get('problems', []):
+                log('Problem: ' + problem)
+            # Actions logs can be public: counts only, details are in the dashboard.
+            builds = result.get('builds', {}).values()
+            result = {'ok': result['ok'], 'problems': result.get('problems', []),
+                      'batches': [{k: b.get(k) for k in ('batch', 'found', 'screened', 'skipped', 'queries', 'error') if k in b} for b in result.get('batches', [])],
+                      'websites_built': sum(1 for b in builds if b.get('ok')), 'websites_failed': sum(1 for b in builds if not b.get('ok'))}
+        elif args.cmd == 'pending':
+            import discover
+            ledger = default_ledger()
+            if in_actions() and ledger.kind != 'sheets':
+                raise BuildError('Add the REVAMP_SHEETS_URL and REVAMP_SHEETS_TOKEN secrets on GitHub so the run can reach your ledger')
+            state = ledger.state()
+            requests = [j for j in state.get('jobs', []) if j.get('stage') == 'queued' and not j.get('worker')
+                        and (j.get('data') or {}).get('generate_requested_at')]
+            batches = discover.pending_batches(state)
+            result = {'work': bool(requests or batches), 'requests': len(requests), 'batches': len(batches)}
+            if os.environ.get('GITHUB_OUTPUT'):
+                with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+                    output.write(f"work={'true' if result['work'] else 'false'}\n")
         elif args.cmd == 'doctor':
             ledger = default_ledger()
             result = {'ledger': ledger.kind, 'claude_cli': find_claude(), 'problems': preflight(),
