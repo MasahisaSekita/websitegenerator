@@ -7,13 +7,18 @@
  * dashboard reaches the ledger only through the access-checked endpoints in Code.gs.
  */
 
-const STAGES_ = ['queued', 'reviewing', 'extracting', 'building', 'checking', 'deploying', 'ready', 'contacting', 'complete', 'sent', 'uncertain', 'blocked', 'skipped', 'manual'];
-const NEXT_STAGES_ = { queued: ['reviewing'], reviewing: ['extracting'], extracting: ['building'], building: ['checking'], checking: ['building', 'deploying'], deploying: ['checking', 'ready'], ready: ['contacting'], contacting: ['complete', 'sent', 'uncertain', 'blocked'] };
-const TERMINAL_STAGES_ = ['complete', 'sent', 'uncertain', 'blocked', 'skipped', 'manual'];
-const SUCCESS_STAGES_ = ['complete', 'sent'];
+const STAGES_ = ['queued', 'reviewing', 'extracting', 'building', 'checking', 'deploying', 'ready', 'contacting', 'complete', 'sent', 'uncertain', 'blocked', 'skipped', 'manual', 'delivered'];
+const NEXT_STAGES_ = { queued: ['reviewing'], reviewing: ['extracting'], extracting: ['building'], building: ['checking'], checking: ['building', 'deploying', 'delivered'], deploying: ['checking', 'ready'], ready: ['contacting'], contacting: ['complete', 'sent', 'uncertain', 'blocked'] };
+const TERMINAL_STAGES_ = ['complete', 'sent', 'uncertain', 'blocked', 'skipped', 'manual', 'delivered'];
+const SUCCESS_STAGES_ = ['complete', 'sent', 'delivered'];
 const CONTACT_STAGES_ = ['contacting', 'complete', 'sent', 'uncertain', 'manual'];
-const UPDATE_FIELDS_ = ['reason', 'preview_url', 'qa_passed', 'preview_verified', 'source_urls', 'screenshots', 'browser_id', 'tab_id', 'workspace', 'booking_url', 'logo_decision', 'cost', 'failure', 'contact_url', 'qualification', 'seo_checked', 'outreach_mode', 'contact_email', 'contact_phone'];
+const UPDATE_FIELDS_ = ['reason', 'preview_url', 'qa_passed', 'preview_verified', 'source_urls', 'screenshots', 'browser_id', 'tab_id', 'workspace', 'booking_url', 'logo_decision', 'cost', 'failure', 'contact_url', 'qualification', 'seo_checked', 'outreach_mode', 'contact_email', 'contact_phone', 'site_file', 'jetai', 'generation'];
 const BATCH_STATUSES_ = ['running', 'complete', 'blocked', 'exhausted'];
+// 'build': the coordinator finds and builds websites. 'targets': it only lists qualified businesses and
+// the operator presses Generate on the ones to build. The mode lives in Config as batch_mode:<id>.
+const BATCH_MODES_ = ['build', 'targets'];
+const HAND_PICKED_ = { industry: 'Hand-picked websites', city: 'Added from the dashboard' };
+const PROP_GENERATOR_ = 'GENERATOR_STATUS';
 const FINISH_STATUSES_ = ['submitted', 'sent', 'uncertain', 'blocked'];
 
 class LedgerError_ extends Error {
@@ -204,10 +209,25 @@ function batchProgress_(batch, jobs) {
   return { completed_count: completed, active_count: active, remaining_count: remaining, manual_count: counts.manual || 0, available_count: Math.max(0, remaining - active) };
 }
 
+function batchMode_(tx, batchId) {
+  const row = tx.table('config').find(item => item.key === 'batch_mode:' + batchId);
+  return row && BATCH_MODES_.indexOf(row.value) >= 0 ? row.value : 'build';
+}
+
+/** The website generator's last heartbeat (tools/site_runner.py), or null. */
+function generatorStatus_() {
+  try {
+    const value = JSON.parse(PropertiesService.getScriptProperties().getProperty(PROP_GENERATOR_) || 'null');
+    return isPlainObject_(value) ? value : null;
+  } catch (error) {
+    return null;
+  }
+}
+
 function snapshot_(tx) {
   const jobs = tx.table('jobs').rows;
   return {
-    batches: tx.table('batches').rows.map(batch => Object.assign({}, batch, batchProgress_(batch, jobs))),
+    batches: tx.table('batches').rows.map(batch => Object.assign({}, batch, batchProgress_(batch, jobs), { mode: batchMode_(tx, batch.id) })),
     jobs: jobs.map(job => {
       try {
         return Object.assign({}, job, { data: parseJobData_(job) });
@@ -218,6 +238,7 @@ function snapshot_(tx) {
     events: recentEvents_(200),
     workers: tx.table('workers').rows.map(worker => Object.assign({}, worker)),
     settings: { batch_size: 5, max_workers: maxWorkers_(tx) },
+    generator: generatorStatus_(),
     server_time: nowIso_(),
   };
 }
@@ -225,18 +246,25 @@ function snapshot_(tx) {
 // ---------------------------------------------------------------------------
 // Batches
 
-function createBatch_(industry, city, requestedCount) {
+function createBatch_(industry, city, requestedCount, mode) {
   if (requestedCount === undefined || requestedCount === null) requestedCount = 5;
+  if (mode === undefined || mode === null || mode === '') mode = 'build';
   if (typeof industry !== 'string' || typeof city !== 'string' || !industry.trim() || !city.trim()) throw new LedgerError_('Industry and city are required');
   if (industry.length > 150 || city.length > 150) throw new LedgerError_('Use an industry and city under 150 characters');
   if (typeof requestedCount !== 'number' || !Number.isInteger(requestedCount) || requestedCount < 1 || requestedCount > 100) {
     throw new LedgerError_('Website count must be a whole number from 1 to 100');
   }
+  if (BATCH_MODES_.indexOf(mode) < 0) throw new LedgerError_('Batch mode must be build or targets');
   return writeLedger_(tx => {
     const id = ident_('batch');
     tx.table('batches').insert({ id, industry: industry.trim(), city: city.trim(), status: 'queued', created_at: nowIso_(), requested_count: requestedCount });
-    tx.event(null, `Batch queued: ${requestedCount} websites for ${industry.trim()} in ${city.trim()}. Waiting for Codex coordinator.`);
-    return { id, status: 'queued', requested_count: requestedCount };
+    if (mode === 'targets') {
+      tx.table('config').insert({ key: 'batch_mode:' + id, value: mode });
+      tx.event(null, `Batch queued: find ${requestedCount} target websites for ${industry.trim()} in ${city.trim()}. Waiting for the coordinator; press Generate on the targets you want built.`);
+    } else {
+      tx.event(null, `Batch queued: ${requestedCount} websites for ${industry.trim()} in ${city.trim()}. Waiting for the coordinator.`);
+    }
+    return { id, status: 'queued', requested_count: requestedCount, mode };
   });
 }
 
@@ -313,24 +341,109 @@ function addJob_(batchId, name, url, aliases) {
   requireText_(name, 'Business name');
   const list = Array.isArray(aliases) ? aliases : aliases ? [aliases] : [];
   const keys = Array.from(new Set(['domain:' + domain].concat(list.map(identity_))));
+  return writeLedger_(tx => ({ id: insertJob_(tx, batchId, name, url, domain, keys) }));
+}
+
+/** Registers one business inside a write transaction; shared by addJob_ and addTarget_. */
+function insertJob_(tx, batchId, name, url, domain, keys) {
+  const batch = tx.table('batches').find(row => row.id === batchId);
+  if (!batch) throw new LedgerError_('Unknown batch');
+  const jobs = tx.table('jobs'), identities = tx.table('identities');
+  if (!batchProgress_(batch, jobs.rows).available_count) {
+    throw new LedgerError_('Completed and in-progress jobs cover the target; wait for an outcome before adding replacements');
+  }
+  const sameDomain = jobs.find(job => job.domain === domain);
+  if (sameDomain) throw new LedgerError_(`UNIQUE constraint failed: domain:${domain} is already registered to job ${sameDomain.id}`);
+  keys.forEach(key => {
+    const owner = identities.find(row => row.identity === key);
+    if (owner) throw new LedgerError_(`UNIQUE constraint failed: ${key} is already registered to job ${owner.job_id}`);
+  });
+  const id = ident_('site');
+  jobs.insert({ id, batch_id: batchId, name: name.trim(), url, domain, stage: 'queued', worker: null, detail: '', reason: '', preview_url: '', contact_status: 'not_sent', data: '{}', updated_at: nowIso_() });
+  keys.forEach(key => identities.insert({ identity: key, job_id: id }));
+  tx.event(id, 'Prospect registered; exclusive identity reserved.');
+  return id;
+}
+
+/** Adds a business to a target list (the hand-picked list by default) and optionally requests its website. */
+function addTarget_(input, actor) {
+  const values = isPlainObject_(input) ? input : {};
+  const name = typeof values.name === 'string' ? values.name.replace(/\s+/g, ' ').trim() : '';
+  if (!name) throw new LedgerError_('Business name is required');
+  if (name.length > 200) throw new LedgerError_('Use a business name under 200 characters');
+  let url = typeof values.url === 'string' ? values.url.trim() : '';
+  if (!url) throw new LedgerError_('Website address is required');
+  if (url.indexOf('://') < 0) url = 'https://' + url;
+  const domain = domain_(url);
+  const aliases = Array.isArray(values.aliases) ? values.aliases : values.aliases ? [values.aliases] : [];
+  const keys = Array.from(new Set(['domain:' + domain].concat(aliases.map(identity_))));
+  const reason = typeof values.reason === 'string' ? truncate_(values.reason.trim(), 1000) : '';
+  const batchId = typeof values.batch_id === 'string' && values.batch_id ? values.batch_id : typeof values.batch === 'string' && values.batch ? values.batch : '';
   return writeLedger_(tx => {
-    const batch = tx.table('batches').find(row => row.id === batchId);
-    if (!batch) throw new LedgerError_('Unknown batch');
-    const jobs = tx.table('jobs'), identities = tx.table('identities');
-    if (!batchProgress_(batch, jobs.rows).available_count) {
-      throw new LedgerError_('Completed and in-progress jobs cover the target; wait for an outcome before adding replacements');
+    let target = batchId;
+    if (!target) {
+      const jobs = tx.table('jobs').rows;
+      const open = tx.table('batches').rows.filter(batch => batch.industry === HAND_PICKED_.industry && batch.city === HAND_PICKED_.city && ['cancelled', 'complete', 'exhausted'].indexOf(batch.status) < 0)
+        .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))
+        .find(batch => batchProgress_(batch, jobs).available_count > 0);
+      if (open) target = open.id;
+      else {
+        target = ident_('batch');
+        tx.table('batches').insert({ id: target, industry: HAND_PICKED_.industry, city: HAND_PICKED_.city, status: 'running', created_at: nowIso_(), requested_count: 100 });
+        tx.table('config').insert({ key: 'batch_mode:' + target, value: 'targets' });
+        tx.event(null, 'Started the hand-picked websites list for businesses added from the dashboard.');
+      }
     }
-    const sameDomain = jobs.find(job => job.domain === domain);
-    if (sameDomain) throw new LedgerError_(`UNIQUE constraint failed: domain:${domain} is already registered to job ${sameDomain.id}`);
-    keys.forEach(key => {
-      const owner = identities.find(row => row.identity === key);
-      if (owner) throw new LedgerError_(`UNIQUE constraint failed: ${key} is already registered to job ${owner.job_id}`);
+    const id = insertJob_(tx, target, name, url, domain, keys);
+    if (reason) tx.table('jobs').update(tx.table('jobs').find(row => row.id === id), { reason });
+    if (values.generate) markRequested_(tx, tx.table('jobs').find(row => row.id === id), actor);
+    return { id, batch_id: target, requested: Boolean(values.generate) };
+  });
+}
+
+function markRequested_(tx, job, actor) {
+  const data = parseJobData_(job);
+  if (data.generate_requested_at) return data.generate_requested_at;
+  const now = nowIso_();
+  data.generate_requested_at = now;
+  data.generate_requested_by = actor;
+  tx.table('jobs').update(job, { data: JSON.stringify(data), detail: 'Website requested; waiting for the website generator.', updated_at: now });
+  tx.event(job.id, `Website requested by ${actor}; waiting for the website generator.`);
+  return now;
+}
+
+/** Marks a queued business for the website generator (tools/site_runner.py watch). */
+function requestWebsite_(jobId, actor) {
+  actor = String(actor || 'the dashboard').replace(/\s+/g, ' ').trim().slice(0, 120) || 'the dashboard';
+  return writeLedger_(tx => {
+    const job = tx.table('jobs').find(row => row.id === jobId);
+    if (!job) throw new LedgerError_('Unknown job');
+    if (job.stage !== 'queued' || job.worker) throw new LedgerError_('Only a business waiting in the queue can be generated');
+    const already = parseJobData_(job).generate_requested_at;
+    const requestedAt = markRequested_(tx, job, actor);
+    return already ? { id: jobId, requested_at: requestedAt, already_requested: true } : { id: jobId, requested_at: requestedAt };
+  });
+}
+
+/** Queued businesses waiting for the generator, oldest first; also stores the generator's heartbeat. Reads without the lock. */
+function pendingRequests_(heartbeat) {
+  if (heartbeat !== undefined && heartbeat !== null) {
+    if (!isPlainObject_(heartbeat)) throw new LedgerError_('Heartbeat must be a JSON object');
+    const value = {};
+    ['host', 'note', 'ready', 'running', 'max_parallel'].forEach(key => { if (key in heartbeat) value[key] = heartbeat[key]; });
+    value.seen_at = nowIso_();
+    PropertiesService.getScriptProperties().setProperty(PROP_GENERATOR_, truncate_(JSON.stringify(value), 4000));
+  }
+  return readLedger_(tx => {
+    const requests = [];
+    tx.table('jobs').rows.forEach(job => {
+      if (job.stage !== 'queued' || job.worker) return;
+      let data = {};
+      try { data = parseJobData_(job); } catch (error) { return; }
+      if (data.generate_requested_at) requests.push({ id: job.id, batch_id: job.batch_id, name: job.name, url: job.url, requested_at: data.generate_requested_at });
     });
-    const id = ident_('site');
-    jobs.insert({ id, batch_id: batchId, name: name.trim(), url, domain, stage: 'queued', worker: null, detail: '', reason: '', preview_url: '', contact_status: 'not_sent', data: '{}', updated_at: nowIso_() });
-    keys.forEach(key => identities.insert({ identity: key, job_id: id }));
-    tx.event(id, 'Prospect registered; exclusive identity reserved.');
-    return { id };
+    requests.sort((a, b) => String(a.requested_at).localeCompare(String(b.requested_at)));
+    return { requests, server_time: nowIso_() };
   });
 }
 
@@ -350,22 +463,36 @@ function idleWorker_(tx, worker, now) {
   if (row) workers.update(row, { status: 'idle', updated_at: now });
 }
 
-function claimJob_(batchId, worker) {
+/** Reserves the oldest queued job of a batch, or the given queued job, for one worker. */
+function claimJob_(batchId, worker, jobId) {
   requireText_(worker, 'Worker ID');
+  if (!batchId && !jobId) throw new LedgerError_('Give a batch or a job to claim');
   return writeLedger_(tx => {
     const workers = tx.table('workers');
     if (workers.find(row => row.id === worker && row.status === 'running')) throw new LedgerError_('Worker already owns a running job');
     if (workers.filter(row => row.status === 'running').length >= maxWorkers_(tx)) throw new LedgerError_('Worker capacity reached');
     const jobs = tx.table('jobs');
-    const job = jobs.find(row => row.batch_id === batchId && row.stage === 'queued' && !row.worker);
-    if (!job) return { job: null };
+    let job;
+    if (jobId) {
+      job = jobs.find(row => row.id === jobId);
+      if (!job) throw new LedgerError_('Unknown job');
+      if (batchId && job.batch_id !== batchId) throw new LedgerError_('That job belongs to another batch');
+      if (job.stage !== 'queued' || job.worker) throw new LedgerError_('Only a queued, unassigned job can be claimed');
+    } else {
+      job = jobs.find(row => row.batch_id === batchId && row.stage === 'queued' && !row.worker);
+      if (!job) return { job: null };
+    }
     const now = nowIso_();
-    jobs.update(job, { worker, stage: 'reviewing', updated_at: now });
+    // A claim answers any pending Generate request, so a failed run is never retried automatically.
+    const data = parseJobData_(job);
+    delete data.generate_requested_at;
+    delete data.generate_requested_by;
+    jobs.update(job, { worker, stage: 'reviewing', data: JSON.stringify(data), updated_at: now });
     const existing = workers.find(row => row.id === worker);
     if (existing) workers.update(existing, { job_id: job.id, status: 'running', updated_at: now });
     else workers.insert({ id: worker, job_id: job.id, status: 'running', updated_at: now });
     const batches = tx.table('batches');
-    const batch = batches.find(row => row.id === batchId);
+    const batch = batches.find(row => row.id === job.batch_id);
     if (batch) batches.update(batch, { status: 'running' });
     tx.event(job.id, `${worker} claimed this business.`);
     return { job: Object.assign({}, job) };
@@ -377,7 +504,7 @@ function updateJob_(jobId, worker, stage, detail, fields) {
   if (!isPlainObject_(fields)) throw new LedgerError_('Fields must be a JSON object');
   const unknown = Object.keys(fields).filter(key => UPDATE_FIELDS_.indexOf(key) < 0);
   if (unknown.length) throw new LedgerError_('Unknown fields: ' + unknown.join(', '));
-  ['reason', 'preview_url'].forEach(key => {
+  ['reason', 'preview_url', 'site_file'].forEach(key => {
     if (key in fields && fields[key] !== null && typeof fields[key] !== 'string') throw new LedgerError_(`${key} must be text`);
   });
   detail = detail === undefined || detail === null ? '' : String(detail);
@@ -399,6 +526,9 @@ function updateJob_(jobId, worker, stage, detail, fields) {
     if (next === 'ready' && (data.preview_verified !== true || typeof preview !== 'string' || preview.indexOf('https://') !== 0)) {
       throw new LedgerError_('Verified HTTPS preview required');
     }
+    if (next === 'delivered' && (data.qa_passed !== true || typeof data.site_file !== 'string' || !data.site_file.trim())) {
+      throw new LedgerError_('Passing QA and the delivered site file are required');
+    }
     const now = nowIso_();
     jobs.update(job, {
       stage: next,
@@ -410,7 +540,7 @@ function updateJob_(jobId, worker, stage, detail, fields) {
     });
     const workers = tx.table('workers');
     const row = workers.find(item => item.id === worker);
-    if (row) workers.update(row, next === 'blocked' || next === 'skipped' ? { status: 'idle', updated_at: now } : { updated_at: now });
+    if (row) workers.update(row, ['blocked', 'skipped', 'delivered'].indexOf(next) >= 0 ? { status: 'idle', updated_at: now } : { updated_at: now });
     tx.event(jobId, detail || `Stage: ${next}`);
     return { id: jobId, stage: next };
   });
@@ -511,14 +641,14 @@ function recoverJob_(jobId, reason) {
     // Never recycle an outreach attempt, even after a crash.
     const submissions = tx.table('submissions');
     const attempt = submissions.find(row => row.job_id === jobId);
-    if (['complete', 'sent', 'manual'].indexOf(job.stage) >= 0) throw new LedgerError_('Sent or manual outreach jobs cannot be automatically recovered');
+    if (['complete', 'sent', 'manual', 'delivered'].indexOf(job.stage) >= 0) throw new LedgerError_('Sent, delivered or manual outreach jobs cannot be automatically recovered');
     const target = attempt ? 'uncertain' : 'queued';
     const now = nowIso_();
-    jobs.update(job, { stage: target, worker: null, updated_at: now, contact_status: attempt ? 'uncertain' : job.contact_status });
+    jobs.update(job, { stage: target, worker: null, detail: truncate_(reason.trim(), 4000), updated_at: now, contact_status: attempt ? 'uncertain' : job.contact_status });
     const workers = tx.table('workers');
     workers.filter(row => row.job_id === jobId).forEach(row => workers.update(row, { status: 'idle', updated_at: now }));
     if (attempt) submissions.update(attempt, { status: 'uncertain', evidence: reason });
-    tx.event(jobId, 'Coordinator recovery after worker stopped: ' + reason);
+    tx.event(jobId, (attempt ? 'Marked uncertain after the worker stopped: ' : 'Returned to the queue: ') + reason.trim());
     return { stage: target };
   });
 }

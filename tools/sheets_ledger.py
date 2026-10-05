@@ -20,10 +20,10 @@ import urllib.request
 ROOT = Path(__file__).resolve().parents[1]
 ENV_FILE = ROOT / '.env'
 LOCAL_DB = ROOT / 'data' / 'revamp.sqlite3'
-STAGES = ['queued', 'reviewing', 'extracting', 'building', 'checking', 'deploying', 'ready', 'contacting', 'complete', 'sent', 'uncertain', 'blocked', 'skipped', 'manual']
+STAGES = ['queued', 'reviewing', 'extracting', 'building', 'checking', 'deploying', 'ready', 'contacting', 'complete', 'sent', 'uncertain', 'blocked', 'skipped', 'manual', 'delivered']
 TABLES = ('batches', 'jobs', 'identities', 'events', 'workers', 'submissions', 'config')
 # Only reads are retried after a network failure: a write may already have been applied.
-READ_ONLY = {'state', 'ping'}
+READ_ONLY = {'state', 'ping', 'requests'}  # 'requests' also records the generator heartbeat, which is safe to repeat
 
 
 def env_values(path):
@@ -118,11 +118,17 @@ def run(a):
     if a.cmd == 'migrate':
         return call('import', {'tables': local_tables(a.db), 'source': str(a.db)}, attempts=1)
     if a.cmd == 'batch':
-        return call('batch', {'industry': a.industry, 'city': a.city, 'count': a.count})
+        return call('batch', {'industry': a.industry, 'city': a.city, 'count': a.count, **({'mode': a.mode} if a.mode != 'build' else {})})
     if a.cmd == 'add':
         return call('add', {'batch': a.batch, 'name': a.name, 'url': a.url, 'alias': a.alias})
+    if a.cmd == 'add-target':
+        return call('add-target', {'name': a.name, 'url': a.url, 'batch': a.batch, 'alias': a.alias, 'reason': a.reason, 'generate': a.generate, 'by': a.by})
     if a.cmd == 'claim':
-        return call('claim', {'batch': a.batch, 'worker': a.worker})
+        return call('claim', {'batch': a.batch, 'worker': a.worker, **({'job': a.job} if a.job else {})})
+    if a.cmd == 'request':
+        return call('request', {'job': a.job, 'by': a.by})
+    if a.cmd == 'requests':
+        return call('requests', {'heartbeat': json.loads(a.heartbeat) if a.heartbeat else None})
     if a.cmd == 'update':
         fields = json.loads(read_text(a.fields)) if a.fields else None
         return call('update', {'job': a.job, 'worker': a.worker, 'stage': a.stage, 'detail': a.detail, 'fields': fields})
@@ -152,9 +158,12 @@ def parser():
     sub = p.add_subparsers(dest='cmd', required=True)
     sub.add_parser('state')
     sub.add_parser('ping', help='Check the URL and token')
-    s = sub.add_parser('batch'); s.add_argument('--industry', required=True); s.add_argument('--city', required=True); s.add_argument('--count', type=int, default=5)
+    s = sub.add_parser('batch'); s.add_argument('--industry', required=True); s.add_argument('--city', required=True); s.add_argument('--count', type=int, default=5); s.add_argument('--mode', choices=['build', 'targets'], default='build')
     s = sub.add_parser('add'); s.add_argument('--batch', required=True); s.add_argument('--name', required=True); s.add_argument('--url', required=True); s.add_argument('--alias', action='append', default=[])
-    s = sub.add_parser('claim'); s.add_argument('--batch', required=True); s.add_argument('--worker', required=True)
+    s = sub.add_parser('add-target'); s.add_argument('--name', required=True); s.add_argument('--url', required=True); s.add_argument('--batch'); s.add_argument('--alias', action='append', default=[]); s.add_argument('--reason', default='', help='Why it qualified, shown in the dashboard'); s.add_argument('--generate', action='store_true'); s.add_argument('--by', default='the coordinator')
+    s = sub.add_parser('claim'); s.add_argument('--batch'); s.add_argument('--job'); s.add_argument('--worker', required=True)
+    s = sub.add_parser('request', help='Ask the website generator to build a queued business'); s.add_argument('--job', required=True); s.add_argument('--by', default='the coordinator')
+    s = sub.add_parser('requests', help='List Generate requests (the website generator polls this)'); s.add_argument('--heartbeat', help='JSON status of the generator to record')
     s = sub.add_parser('update'); s.add_argument('--job', required=True); s.add_argument('--worker', required=True); s.add_argument('--stage', choices=STAGES); s.add_argument('--detail', default=''); s.add_argument('--fields', type=Path)
     s = sub.add_parser('alias'); s.add_argument('--job', required=True); s.add_argument('--worker', required=True); s.add_argument('--identity', required=True)
     s = sub.add_parser('capacity'); s.add_argument('count', type=int, choices=range(1, 6))

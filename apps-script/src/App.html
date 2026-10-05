@@ -100,7 +100,7 @@
   const STAGE_LABELS = {
     queued: 'Queued', reviewing: 'Reviewing', extracting: 'Collecting details', building: 'Building', checking: 'Checking',
     deploying: 'Deploying', ready: 'Preview live', contacting: 'Contacting', complete: 'Sent', sent: 'Sent',
-    uncertain: 'Uncertain', blocked: 'Blocked', skipped: 'Skipped', manual: 'Manual outreach',
+    uncertain: 'Uncertain', blocked: 'Blocked', skipped: 'Skipped', manual: 'Manual outreach', delivered: 'Delivered',
   };
   const STEPS = [
     { label: 'Queued', stages: ['queued'] },
@@ -111,16 +111,21 @@
     { label: 'Live', stages: ['ready'] },
     { label: 'Outreach', stages: ['contacting', 'complete', 'sent', 'manual'] },
   ];
+  // With delivery "file" a website is finished once QA passes and the file is handed over.
+  const FILE_STEPS = STEPS.slice(0, 4).concat([{ label: 'Delivered', stages: ['delivered'] }]);
+  const GENERATOR_COMMAND = 'python tools/site_runner.py watch';
   const CATEGORIES = [
     { key: 'all', label: 'All' },
+    { key: 'target', label: 'Targets' },
     { key: 'working', label: 'In progress' },
     { key: 'live', label: 'Preview live' },
     { key: 'manual', label: 'Manual' },
     { key: 'sent', label: 'Sent' },
+    { key: 'delivered', label: 'Delivered' },
     { key: 'attention', label: 'Needs attention' },
     { key: 'skipped', label: 'Skipped' },
   ];
-  const CATEGORY_ORDER = ['working', 'live', 'manual', 'attention', 'sent', 'skipped'];
+  const CATEGORY_ORDER = ['working', 'target', 'live', 'manual', 'attention', 'sent', 'delivered', 'skipped'];
   const BATCH_TONES = { queued: 'neutral', running: 'working', complete: 'sent', exhausted: 'manual', blocked: 'attention', cancelled: 'skipped' };
   const CONTACT_LABELS = {
     not_sent: 'Not sent yet', attempting: 'Submission in progress', submitted: 'Submitted through the contact form', sent: 'Sent',
@@ -129,20 +134,31 @@
   const label = value => String(value || '').replace(/[_-]+/g, ' ').replace(/^./, character => character.toUpperCase());
 
   const dataOf = job => (job && job.data && typeof job.data === 'object' ? job.data : {});
+  const requestedAt = job => dataOf(job).generate_requested_at || '';
+  const isTarget = job => job.stage === 'queued' && !job.worker;
+  const jetaiOf = job => (dataOf(job).jetai && typeof dataOf(job).jetai === 'object' ? dataOf(job).jetai : {});
+  const batchMode = batch => (batch && batch.mode === 'targets' ? 'targets' : 'build');
+  const isHandPicked = batch => Boolean(batch && batch.industry === 'Hand-picked websites');
   const isManual = job => job.stage === 'manual' || job.contact_status === 'manual_required';
   const manualInfo = job => (dataOf(job).manual_outreach && typeof dataOf(job).manual_outreach === 'object' ? dataOf(job).manual_outreach : {});
   const manualSent = job => Boolean(manualInfo(job).sent_at);
   function category(job) {
     if (isManual(job)) return 'manual';
+    if (job.stage === 'queued') return 'target';
     if (['blocked', 'uncertain', 'failed', 'error', 'needs_attention'].includes(job.stage)) return 'attention';
     if (['skipped', 'rejected'].includes(job.stage)) return 'skipped';
+    if (job.stage === 'delivered') return 'delivered';
     if (['complete', 'sent', 'completed', 'contacted'].includes(job.stage) || ['submitted', 'sent'].includes(job.contact_status)) return 'sent';
     if (job.stage === 'ready') return 'live';
     return 'working';
   }
-  const toneOf = job => (category(job) === 'manual' && manualSent(job) ? 'sent' : category(job));
+  const toneOf = job => {
+    const cat = category(job);
+    return cat === 'delivered' || (cat === 'manual' && manualSent(job)) ? 'sent' : cat;
+  };
   function stageLabel(job) {
     if (job.stage === 'manual') return manualSent(job) ? 'Manual · sent' : 'Manual · to send';
+    if (job.stage === 'queued') return requestedAt(job) ? 'Requested' : 'Target';
     return STAGE_LABELS[job.stage] || label(job.stage) || 'Queued';
   }
   function stepIndex(job) {
@@ -155,12 +171,22 @@
     if (facts.workspace) return 2;
     return 1;
   }
+  // Websites built by the generator, or meant for it, end with a delivered file instead of hosting and outreach.
+  function fileFlow(job) {
+    const facts = dataOf(job);
+    return job.stage === 'delivered' || Boolean(facts.site_file || facts.jetai || requestedAt(job)) || /^generator-/.test(job.worker || '') || batchMode(batchById(job.batch_id)) === 'targets';
+  }
+  const stepsFor = job => (fileFlow(job) ? FILE_STEPS : STEPS);
   function stepStates(job) {
-    const cat = category(job), index = stepIndex(job);
+    const steps = stepsFor(job);
+    const cat = category(job);
+    const found = steps.findIndex(step => step.stages.includes(job.stage));
+    const index = found >= 0 ? found : Math.min(stepIndex(job), steps.length - 1);
     const stopped = cat === 'attention' || cat === 'skipped';
     const finished = cat === 'sent' || (cat === 'manual' && manualSent(job));
-    if (job.stage === 'queued') return STEPS.map((step, i) => (i === 0 ? 'wait' : 'todo'));
-    return STEPS.map((step, i) => (i < index ? 'done' : i > index ? 'todo' : finished ? 'done' : stopped ? 'stop' : 'now'));
+    if (job.stage === 'delivered') return steps.map(() => 'done');
+    if (job.stage === 'queued') return steps.map((step, i) => (i === 0 ? 'wait' : 'todo'));
+    return steps.map((step, i) => (i < index ? 'done' : i > index ? 'todo' : finished ? 'done' : stopped ? 'stop' : 'now'));
   }
 
   // ---------------------------------------------------------------------------
@@ -174,6 +200,7 @@
   let pollInFlight = false;
   let lastFullFetch = 0;
   let failures = 0;
+  let pendingOpen = null; // a business added from the dashboard opens once the next sync brings it in
   const activity = {};
   const ui = {
     batch: 'all',
@@ -190,7 +217,20 @@
   const scopeBatches = () => (data ? (ui.batch === 'all' ? data.batches : data.batches.filter(batch => batch.id === ui.batch)) : []);
   const scopeJobs = () => (data ? (ui.batch === 'all' ? data.jobs : data.jobs.filter(job => job.batch_id === ui.batch)) : []);
   const batchName = batch => (batch ? `${batch.industry} · ${batch.city}` : '');
-  const runPrompt = batch => `Use $local-business-revamp to run the queued dashboard batch ${batch.id}: ${batch.requested_count} completed websites for ${batch.industry} in ${batch.city}.`;
+  const runPrompt = batch => (batchMode(batch) === 'targets'
+    ? `/local-business-revamp Find targets for the queued dashboard batch ${batch.id}: ${batch.requested_count} qualified ${batch.industry} businesses in ${batch.city}. Register them without building websites; I'll press Generate in the dashboard.`
+    : `/local-business-revamp Run the queued dashboard batch ${batch.id}: ${batch.requested_count} completed websites for ${batch.industry} in ${batch.city}.`);
+
+  /** The website generator (tools/site_runner.py) reports a heartbeat while it polls the ledger. */
+  function generatorState() {
+    const status = data && data.generator && typeof data.generator === 'object' ? data.generator : null;
+    const seen = status ? Date.parse(status.seen_at) : NaN;
+    if (!status || !Number.isFinite(seen)) return { tone: 'neutral', label: 'Not running', online: false, note: 'Nothing has connected yet. Start it on the computer that builds the websites.' };
+    if (now() - seen > 90000) return { tone: 'neutral', label: 'Offline', online: false, note: `Last seen ${ago(status.seen_at)}${status.host ? ' on ' + status.host : ''}. Start it again to build requested websites.` };
+    if (!status.ready) return { tone: 'manual', label: 'Needs setup', online: true, note: status.note || 'The generator cannot build websites yet.' };
+    const running = Array.isArray(status.running) ? status.running.length : 0;
+    return { tone: 'sent', label: running ? `Building ${plural(running, 'website')}` : 'Ready', online: true, ready: true, note: `Running on ${status.host || 'a computer'} · builds up to ${status.max_parallel || 2} at a time.` };
+  }
 
   function matchesSearch(job) {
     if (!ui.search) return true;
@@ -240,9 +280,9 @@
   };
   const batchChip = batch => `<span class="chip chip-sm${batch.status === 'running' ? ' is-moving' : ''}" data-tone="${BATCH_TONES[batch.status] || 'neutral'}"><span class="chip-dot"></span>${esc(label(batch.status))}</span>`;
   function track(job) {
-    const states = stepStates(job);
+    const states = stepStates(job), steps = stepsFor(job);
     const at = states.findIndex(state => state === 'now' || state === 'stop' || state === 'wait');
-    const description = at >= 0 ? `${states[at] === 'stop' ? 'Stopped at' : states[at] === 'wait' ? 'Waiting at' : 'At'} ${STEPS[at].label}, step ${at + 1} of ${STEPS.length}` : 'All steps done';
+    const description = at >= 0 ? `${states[at] === 'stop' ? 'Stopped at' : states[at] === 'wait' ? 'Waiting at' : 'At'} ${steps[at].label}, step ${at + 1} of ${steps.length}` : 'All steps done';
     const moving = category(job) === 'working' && job.stage !== 'queued';
     return `<div class="track${moving ? ' is-moving' : ''}" data-tone="${toneOf(job)}" role="img" aria-label="${esc(description)}">${states.map(state => `<i class="${state === 'todo' ? '' : state}"></i>`).join('')}</div>`;
   }
@@ -255,6 +295,7 @@
     if (ui.batch !== 'all' && !batchById(ui.batch)) ui.batch = 'all';
     renderScope();
     renderNotice();
+    renderGenerator();
     renderKpis();
     renderJobs();
     renderBatches();
@@ -277,16 +318,38 @@
       return;
     }
     patch($('#scope-title'), `${esc(batch.industry)} ${batchChip(batch)}`);
-    $('#scope-sub').textContent = `${batch.city} · queued ${shortDate(batch.created_at)} · ${batch.completed_count} of ${batch.requested_count} sent`;
-    const actions = [];
-    if (['queued', 'running'].includes(batch.status)) actions.push(`<button type="button" class="btn btn-secondary btn-sm" data-copy-prompt="${esc(batch.id)}" data-key="scope-prompt">${icon('terminal')}Copy run prompt</button>`);
+    $('#scope-sub').textContent = isHandPicked(batch)
+      ? `Businesses added from the dashboard · ${batch.completed_count} finished`
+      : `${batch.city} · queued ${shortDate(batch.created_at)} · ${batch.completed_count} of ${batch.requested_count} finished${batchMode(batch) === 'targets' ? ' · targets list' : ''}`;
+    const actions = [`<button type="button" class="btn btn-secondary btn-sm" data-add-website="${esc(batch.id)}" data-key="scope-add">${icon('globe')}Add website</button>`];
+    if (['queued', 'running'].includes(batch.status) && !isHandPicked(batch)) actions.push(`<button type="button" class="btn btn-secondary btn-sm" data-copy-prompt="${esc(batch.id)}" data-key="scope-prompt">${icon('terminal')}Copy run prompt</button>`);
     if (['queued', 'running', 'blocked'].includes(batch.status)) actions.push(`<button type="button" class="btn btn-ghost btn-sm" data-cancel-batch="${esc(batch.id)}" data-key="scope-cancel">Cancel batch</button>`);
     actions.push(`<button type="button" class="btn btn-ghost btn-sm" data-set-batch="all" data-key="scope-all">${icon('x')}All batches</button>`);
     patch($('#scope-actions'), actions.join(''));
   }
 
+  function renderGenerator() {
+    const state = generatorState();
+    const requested = data.jobs.filter(job => job.stage === 'queued' && requestedAt(job)).length;
+    $('#generator-note').textContent = requested ? `${requested} requested` : '';
+    const command = `<div class="gen-cmd"><code>${esc(GENERATOR_COMMAND)}</code><button type="button" class="icon-btn icon-btn-sm" data-copy-value="${esc(GENERATOR_COMMAND)}" data-copy-label="Command" aria-label="Copy the command" title="Copy the command" data-key="gen-copy">${icon('copy')}</button></div>`;
+    patch($('#generator'), `<div class="gen-status" data-tone="${state.tone}"><span class="gen-dot" aria-hidden="true"></span><b>${esc(state.label)}</b></div>
+      <p class="gen-note">${esc(state.note)}</p>
+      ${state.online ? '' : `${command}<p class="gen-hint">Run it from the project folder on the computer where Claude Code is signed in, or double-click <b>Start Generator.bat</b>. Generate buttons queue up until it runs.</p>`}
+      ${state.online && !state.ready ? `<p class="gen-hint">Requests wait and start automatically once this is fixed.</p>` : ''}`);
+    const notice = $('#generator-notice');
+    if (!requested || state.ready) {
+      notice.hidden = true;
+      patch(notice, '');
+      return;
+    }
+    notice.hidden = false;
+    notice.setAttribute('data-tone', state.online ? 'manual' : 'target');
+    patch(notice, `<span class="notice-icon">${icon('sparkle')}</span><div class="notice-body"><b>${plural(requested, 'website')} waiting for the website generator.</b><p>${esc(state.online ? state.note : 'It is not running. Start it on your computer; requests are built in the order they were made.')}</p></div>${state.online ? '' : `<div class="notice-actions"><button type="button" class="pill" data-copy-value="${esc(GENERATOR_COMMAND)}" data-copy-label="Command" data-key="gen-notice-copy"><span>${esc(GENERATOR_COMMAND)}</span>${icon('copy')}</button></div>`}`);
+  }
+
   function renderNotice() {
-    const waiting = scopeBatches().filter(batch => batch.status === 'queued').sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at));
+    const waiting = scopeBatches().filter(batch => batch.status === 'queued' && !isHandPicked(batch)).sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at));
     const notice = $('#notice');
     if (!waiting.length) {
       notice.hidden = true;
@@ -295,26 +358,28 @@
     }
     notice.hidden = false;
     notice.setAttribute('data-tone', 'working');
-    const chips = waiting.slice(0, 3).map(batch => `<button type="button" class="pill" data-copy-prompt="${esc(batch.id)}" data-key="notice-${esc(batch.id)}" title="Copy the Codex prompt for this batch"><span>${esc(batchName(batch))}</span>${icon('copy')}</button>`).join('');
-    patch(notice, `<span class="notice-icon">${icon('clock')}</span><div class="notice-body"><b>${plural(waiting.length, 'batch', 'batches')} waiting for the coordinator.</b><p>Nothing runs until you ask Codex. Copy a run prompt and paste it into Codex.</p></div><div class="notice-actions">${chips}</div>`);
+    const chips = waiting.slice(0, 3).map(batch => `<button type="button" class="pill" data-copy-prompt="${esc(batch.id)}" data-key="notice-${esc(batch.id)}" title="Copy the Claude Code prompt for this batch"><span>${esc(batchName(batch))}</span>${icon('copy')}</button>`).join('');
+    patch(notice, `<span class="notice-icon">${icon('clock')}</span><div class="notice-body"><b>${plural(waiting.length, 'batch', 'batches')} waiting for the coordinator.</b><p>Nothing runs until you start it in Claude Code. Copy a run prompt and paste it into Claude Code, opened in the project folder.</p></div><div class="notice-actions">${chips}</div>`);
   }
 
   function renderKpis() {
     const jobs = scopeJobs();
     const counts = {};
     jobs.forEach(job => { const cat = category(job); counts[cat] = (counts[cat] || 0) + 1; });
-    const targets = scopeBatches().filter(batch => batch.status !== 'cancelled');
+    // The hand-picked list has 100 nominal slots; it is not a target to reach.
+    const targets = scopeBatches().filter(batch => batch.status !== 'cancelled' && !isHandPicked(batch));
     const target = sum(targets, batch => batch.requested_count);
     const done = sum(targets, batch => Math.min(batch.completed_count, batch.requested_count));
     const share = target ? Math.round((done / target) * 100) : 0;
-    const queued = jobs.filter(job => job.stage === 'queued').length;
+    const requested = jobs.filter(job => job.stage === 'queued' && requestedAt(job)).length;
     const hosted = jobs.filter(job => safeUrl(job.preview_url)).length;
     const manualOpen = jobs.filter(job => job.stage === 'manual' && !manualSent(job)).length;
     const manualDone = jobs.filter(job => job.stage === 'manual' && manualSent(job)).length;
+    const filesOnly = Boolean(counts.delivered) && !counts.sent;
     const tiles = [
-      { key: 'sent', icon: 'send', label: 'Outreach sent', value: counts.sent || 0, unit: ui.batch !== 'all' && target ? `/ ${target}` : '', sub: target ? `${share}% of the ${target}-site target` : 'No active target', progress: target ? Math.min(100, (done / target) * 100) : null },
-      { key: 'working', icon: 'pulse', label: 'In progress', value: (counts.working || 0) - queued, sub: queued ? `${queued} queued` : 'Nothing queued' },
-      { key: 'live', icon: 'globe', label: 'Preview live', value: counts.live || 0, sub: `${plural(hosted, 'site')} hosted so far` },
+      { key: filesOnly ? 'delivered' : 'sent', icon: filesOnly ? 'check' : 'send', label: filesOnly ? 'Websites delivered' : counts.delivered ? 'Finished' : 'Outreach sent', value: (counts.sent || 0) + (counts.delivered || 0), unit: ui.batch !== 'all' && target ? `/ ${target}` : '', sub: target ? `${share}% of the ${target}-site target` : 'No active target', progress: target ? Math.min(100, (done / target) * 100) : null },
+      { key: 'target', icon: 'sparkle', label: 'Targets', value: counts.target || 0, sub: requested ? `${requested} waiting for the generator` : counts.target ? 'Press Generate on a business' : 'Add a website or find targets' },
+      { key: 'working', icon: 'pulse', label: 'In progress', value: counts.working || 0, sub: counts.live ? `${counts.live} preview live` : hosted ? `${plural(hosted, 'site')} hosted so far` : 'Being built or checked' },
       { key: 'manual', icon: 'hand', label: 'Manual to send', value: manualOpen, sub: manualDone ? `${manualDone} marked sent` : 'Ready-to-copy messages' },
       { key: 'attention', icon: 'alert', label: 'Needs attention', value: counts.attention || 0, sub: `${counts.skipped || 0} skipped` },
     ];
@@ -342,7 +407,7 @@
     let html;
     if (!data.batches.length) html = onboarding();
     else if (!scoped.length) {
-      html = `<div class="empty"><span class="empty-icon">${icon('clock')}</span><h3>No businesses yet</h3><p>Businesses appear here as the coordinator discovers and qualifies them. A queued batch starts when you ask Codex to run it.</p></div>`;
+      html = `<div class="empty"><span class="empty-icon">${icon('clock')}</span><h3>No businesses yet</h3><p>Businesses appear here as the coordinator discovers and qualifies them, or when you add one by its website address.</p><button type="button" class="btn btn-secondary btn-sm" data-add-website="${esc(ui.batch === 'all' ? '' : ui.batch)}" data-key="empty-add">${icon('globe')}Add website</button></div>`;
     } else if (!shown.length) {
       html = `<div class="empty"><span class="empty-icon">${icon('search')}</span><h3>No businesses match</h3><p>Nothing in this view matches your filter${ui.search ? ' and search' : ''}.</p><button type="button" class="btn btn-secondary btn-sm" data-clear-filters data-key="clear-filters">Clear filters</button></div>`;
     } else if (ui.view === 'table' && !narrow.matches) html = jobTable(shown);
@@ -354,18 +419,42 @@
     return `<div class="empty empty-hero">
       <span class="brand-mark" aria-hidden="true">${icon('bolt', 'icon-fill')}</span>
       <h3>Start your first batch</h3>
-      <p>Choose an industry and a place. The Codex coordinator finds local businesses whose websites look dated, builds each one a fresh preview and sends your outreach. Progress shows up here as it happens.</p>
+      <p>Claude Code finds local businesses whose websites look dated; the website generator turns each one's real content into a fresh one-page website and uploads it to JetAI. Progress shows up here as it happens.</p>
       <ol class="how">
-        <li><b>Queue a batch</b><span>Industry, city or state, and how many websites you want.</span></li>
-        <li><b>Ask Codex to run it</b><span>Paste the run prompt the dashboard gives you.</span></li>
-        <li><b>Follow along</b><span>Live previews, sent outreach and manual follow-ups.</span></li>
+        <li><b>Find targets</b><span>Queue a batch and run it in Claude Code, or add a business by its website address.</span></li>
+        <li><b>Press Generate</b><span>The website generator on your computer builds the website and uploads it as a JetAI draft.</span></li>
+        <li><b>Follow along</b><span>Finished websites show up here with their file and JetAI prototype.</span></li>
       </ol>
-      <button type="button" class="btn btn-primary" data-new-batch data-key="onboarding-new">${icon('plus')}New batch</button>
+      <div class="drawer-actions"><button type="button" class="btn btn-primary" data-new-batch data-key="onboarding-new">${icon('plus')}New batch</button><button type="button" class="btn btn-secondary" data-add-website="" data-key="onboarding-add">${icon('globe')}Add website</button></div>
     </div>`;
   }
 
-  function jobCard(job) {
+  /** The right-hand side of a card or row: Generate for targets, otherwise the JetAI or preview link. */
+  function jobAction(job, compact) {
+    if (isTarget(job)) {
+      if (requestedAt(job)) return `<span class="tag tag-wait" title="Requested ${esc(stamp(requestedAt(job)))}">${icon('clock')}Waiting for the generator</span>`;
+      return compact
+        ? `<button type="button" class="icon-btn icon-btn-sm" data-generate="${esc(job.id)}" aria-label="Generate the website of ${esc(job.name)}" title="Generate website" data-key="row-gen-${esc(job.id)}">${icon('sparkle')}</button>`
+        : `<button type="button" class="btn btn-primary btn-sm btn-generate" data-generate="${esc(job.id)}" data-key="gen-${esc(job.id)}">${icon('sparkle')}Generate website</button>`;
+    }
+    const jet = jetaiOf(job);
+    const link = safeUrl(jet.url) || safeUrl(jet.app_url);
+    if (link) return `<a class="job-link" href="${esc(link)}" target="_blank" rel="noopener noreferrer">JetAI ${icon('external')}</a>`;
+    if (jet.prototype_id) return `<span class="tag tag-jetai" title="JetAI prototype ${esc(jet.prototype_id)}">${icon('layers')}JetAI ${esc(jet.status || 'draft')}</span>`;
+    if (jet.error) return `<span class="tag tag-error" title="${esc(jet.error)}">Upload failed</span>`;
     const preview = safeUrl(job.preview_url);
+    if (preview) return compact
+      ? `<a class="icon-btn icon-btn-sm" href="${esc(preview)}" target="_blank" rel="noopener noreferrer" aria-label="Open the preview of ${esc(job.name)}" title="Open preview">${icon('external')}</a>`
+      : `<a class="job-link" href="${esc(preview)}" target="_blank" rel="noopener noreferrer">Preview ${icon('external')}</a>`;
+    return '';
+  }
+  function jobSummary(job) {
+    if (job.detail) return job.detail;
+    if (isTarget(job)) return requestedAt(job) ? 'Waiting for the website generator.' : job.reason ? `Qualified: ${job.reason}` : 'Not built yet. Press Generate to build its website.';
+    return job.reason || 'Waiting for the coordinator.';
+  }
+
+  function jobCard(job) {
     const route = dataOf(job).outreach_mode === 'manual' && job.stage !== 'manual' && category(job) === 'working' ? '<span class="tag tag-manual">Manual route</span>' : '';
     return `<article class="job-card">
       <div class="job-top">
@@ -377,30 +466,29 @@
       </div>
       <div class="job-status">${chip(job)}${route}</div>
       ${track(job)}
-      <p class="job-detail">${esc(job.detail || job.reason || 'Waiting for the coordinator.')}</p>
+      <p class="job-detail">${esc(jobSummary(job))}</p>
       <div class="job-foot">
         <span class="job-time" title="${esc(stamp(job.updated_at))}">${icon('clock')}${esc(ago(job.updated_at))}</span>
-        ${preview ? `<a class="job-link" href="${esc(preview)}" target="_blank" rel="noopener noreferrer">Preview ${icon('external')}</a>` : ''}
+        ${jobAction(job, false)}
       </div>
     </article>`;
   }
 
   function jobTable(jobs) {
     const rows = jobs.map(job => {
-      const preview = safeUrl(job.preview_url);
       const batch = batchById(job.batch_id);
       return `<tr data-row-job="${esc(job.id)}">
         <td><div class="cell-biz">${avatar(job.name, 'sm')}<div><button type="button" class="job-open" data-open-job="${esc(job.id)}" data-key="row-${esc(job.id)}">${esc(job.name || 'Unnamed business')}</button><span class="job-domain">${esc(job.domain || hostOf(job.url))}</span></div></div></td>
         <td>${chip(job)}</td>
         <td>${track(job)}</td>
-        <td class="cell-muted">${esc(batch ? batch.city : '')}</td>
-        <td><span class="cell-detail">${esc(job.detail || job.reason || '—')}</span></td>
+        <td class="cell-muted">${esc(batch ? (isHandPicked(batch) ? 'Hand-picked' : batch.city) : '')}</td>
+        <td><span class="cell-detail">${esc(jobSummary(job))}</span></td>
         <td class="cell-muted" title="${esc(stamp(job.updated_at))}">${esc(ago(job.updated_at))}</td>
-        <td>${preview ? `<a class="icon-btn icon-btn-sm" href="${esc(preview)}" target="_blank" rel="noopener noreferrer" aria-label="Open the preview of ${esc(job.name)}" title="Open preview">${icon('external')}</a>` : ''}</td>
+        <td>${jobAction(job, true)}</td>
       </tr>`;
     }).join('');
     return `<div class="table-wrap"><table class="job-table">
-      <thead><tr><th scope="col">Business</th><th scope="col">Status</th><th scope="col">Progress</th><th scope="col">Location</th><th scope="col">Latest update</th><th scope="col">Updated</th><th scope="col"><span class="sr-only">Preview</span></th></tr></thead>
+      <thead><tr><th scope="col">Business</th><th scope="col">Status</th><th scope="col">Progress</th><th scope="col">Location</th><th scope="col">Latest update</th><th scope="col">Updated</th><th scope="col"><span class="sr-only">Action</span></th></tr></thead>
       <tbody>${rows}</tbody></table></div>`;
   }
 
@@ -412,15 +500,15 @@
       return;
     }
     const totalSent = sum(data.batches, batch => batch.completed_count);
-    const rows = [`<button type="button" class="batch-row batch-all${ui.batch === 'all' ? ' is-active' : ''}" data-set-batch="all" aria-pressed="${ui.batch === 'all'}" data-key="batch-all"><span class="batch-name">All batches</span><span class="batch-stats"><b>${totalSent}</b> sent · ${data.jobs.length} businesses</span></button>`];
+    const rows = [`<button type="button" class="batch-row batch-all${ui.batch === 'all' ? ' is-active' : ''}" data-set-batch="all" aria-pressed="${ui.batch === 'all'}" data-key="batch-all"><span class="batch-name">All batches</span><span class="batch-stats"><b>${totalSent}</b> finished · ${data.jobs.length} businesses</span></button>`];
     batches.forEach(batch => {
       const share = batch.requested_count ? Math.min(100, (batch.completed_count / batch.requested_count) * 100) : 0;
       const extras = [batch.active_count ? `${batch.active_count} active` : '', batch.manual_count ? `${batch.manual_count} manual` : ''].filter(Boolean).join(' · ');
       rows.push(`<button type="button" class="batch-row${ui.batch === batch.id ? ' is-active' : ''}" data-set-batch="${esc(batch.id)}" aria-pressed="${ui.batch === batch.id}" data-key="batch-${esc(batch.id)}">
-        <span class="batch-line"><span class="batch-name">${esc(batch.industry)}</span>${batchChip(batch)}</span>
-        <span class="batch-place">${esc(batch.city)} · ${esc(shortDate(batch.created_at))}</span>
-        <span class="progress" aria-hidden="true"><span style="width:${share.toFixed(1)}%"></span></span>
-        <span class="batch-stats"><b>${batch.completed_count}</b>/${batch.requested_count} sent${extras ? ' · ' + esc(extras) : ''}</span>
+        <span class="batch-line"><span class="batch-name">${esc(batch.industry)}</span>${isHandPicked(batch) ? '' : batchChip(batch)}</span>
+        <span class="batch-place">${esc(batch.city)} · ${esc(shortDate(batch.created_at))}${batchMode(batch) === 'targets' && !isHandPicked(batch) ? ' · targets' : ''}</span>
+        ${isHandPicked(batch) ? '' : `<span class="progress" aria-hidden="true"><span style="width:${share.toFixed(1)}%"></span></span>`}
+        <span class="batch-stats"><b>${batch.completed_count}</b>${isHandPicked(batch) ? '' : '/' + batch.requested_count} finished${extras ? ' · ' + esc(extras) : ''}</span>
       </button>`);
     });
     patch($('#batches'), rows.join(''));
@@ -454,10 +542,11 @@
     }
     patch($('#workers'), items.join(''));
     $('#workers-note').textContent = `${running.length} of ${max} busy`;
-    const queued = scopeJobs().filter(job => job.stage === 'queued').length;
+    const queued = scopeJobs().filter(job => job.stage === 'queued');
+    const asked = queued.filter(requestedAt).length;
     const foot = $('#workers-foot');
-    foot.hidden = !queued;
-    foot.textContent = queued ? `${plural(queued, 'business', 'businesses')} queued for the next free worker` : '';
+    foot.hidden = !queued.length;
+    foot.textContent = queued.length ? `${plural(queued.length, 'target')} not built yet${asked ? ` · ${asked} requested` : ''}` : '';
   }
 
   function renderActivity() {
@@ -497,8 +586,9 @@
     if (sheetUrl) sheet.href = sheetUrl;
     const viewer = data.viewer || {};
     $('#forget-key').hidden = viewer.method !== 'key';
-    const industries = Array.from(new Set(data.batches.slice().reverse().map(batch => batch.industry).concat(['Electricians'])));
-    const cities = Array.from(new Set(data.batches.slice().reverse().map(batch => batch.city)));
+    const real = data.batches.filter(batch => !isHandPicked(batch));
+    const industries = Array.from(new Set(real.slice().reverse().map(batch => batch.industry).concat(['Electricians'])));
+    const cities = Array.from(new Set(real.slice().reverse().map(batch => batch.city)));
     patch($('#industry-options'), industries.map(value => `<option value="${esc(value)}"></option>`).join(''));
     patch($('#city-options'), cities.map(value => `<option value="${esc(value)}"></option>`).join(''));
   }
@@ -530,10 +620,19 @@
       <div class="drawer-titles"><h2 id="drawer-title">${esc(job.name || 'Unnamed business')}</h2>${original ? `<a href="${esc(original)}" target="_blank" rel="noopener noreferrer">${esc(job.domain || hostOf(original))}</a>` : `<span class="job-domain">${esc(job.domain)}</span>`}</div>
       <button type="button" class="icon-btn" data-close-drawer aria-label="Close details" data-key="drawer-close">${icon('x')}</button>`);
     const states = stepStates(job);
+    const jet = jetaiOf(job);
+    const jetLink = safeUrl(jet.url) || safeUrl(jet.app_url);
+    const actions = [];
+    if (isTarget(job) && !requestedAt(job)) actions.push(`<button type="button" class="btn btn-primary btn-generate" data-generate="${esc(job.id)}" data-key="drawer-generate">${icon('sparkle')}Generate website</button>`);
+    if (jetLink) actions.push(`<a class="btn btn-primary" href="${esc(jetLink)}" target="_blank" rel="noopener noreferrer">${icon('layers')}Open in JetAI</a>`);
+    if (preview) actions.push(`<a class="btn btn-primary" href="${esc(preview)}" target="_blank" rel="noopener noreferrer">${icon('globe')}Open preview</a>`);
+    if (original) actions.push(`<a class="btn btn-secondary" href="${esc(original)}" target="_blank" rel="noopener noreferrer">Original site ${icon('external')}</a>`);
+    const waiting = isTarget(job) && requestedAt(job)
+      ? `<div class="callout callout-target"><b>Waiting for the website generator.</b> ${esc(generatorState().ready ? 'It will start this website shortly.' : generatorState().note)}</div>` : '';
     patch(part('status'), `<div class="drawer-status">
       <div class="drawer-meta">${chip(job)}<span title="${esc(stamp(job.updated_at))}">Updated ${esc(ago(job.updated_at))}</span></div>
-      ${preview || original ? `<div class="drawer-actions">${preview ? `<a class="btn btn-primary" href="${esc(preview)}" target="_blank" rel="noopener noreferrer">${icon('globe')}Open preview</a>` : ''}${original ? `<a class="btn btn-secondary" href="${esc(original)}" target="_blank" rel="noopener noreferrer">Original site ${icon('external')}</a>` : ''}</div>` : ''}
-      <ol class="steps" data-tone="${toneOf(job)}" aria-label="Pipeline progress">${STEPS.map((step, index) => {
+      ${actions.length ? `<div class="drawer-actions">${actions.join('')}</div>` : ''}${waiting}
+      <ol class="steps" data-tone="${toneOf(job)}" aria-label="Pipeline progress">${stepsFor(job).map((step, index) => {
         const state = states[index];
         const name = index === 6 && job.stage === 'manual' ? 'Manual' : step.label;
         const marker = state === 'done' ? icon('check') : state === 'stop' ? icon('x') : '';
@@ -597,10 +696,14 @@
     const rows = [
       ['Latest update', esc(job.detail || '—')],
       job.reason ? ['Why it qualified', esc(job.reason)] : null,
-      ['Outreach', esc(CONTACT_LABELS[job.contact_status] || label(job.contact_status) || 'Not sent yet')],
+      job.stage === 'delivered' ? ['Outreach', 'None — the website was handed over as a file'] : fileFlow(job) ? null : ['Outreach', esc(CONTACT_LABELS[job.contact_status] || label(job.contact_status) || 'Not sent yet')],
+      jetaiOf(job).prototype_id ? ['JetAI prototype', `<span class="file-path"><span>${esc(jetaiOf(job).name || 'Website preview')} · ${esc(jetaiOf(job).status || 'draft')}</span><button type="button" class="icon-btn icon-btn-sm" data-copy-value="${esc(jetaiOf(job).prototype_id)}" data-copy-label="Prototype ID" aria-label="Copy the prototype ID" title="Copy the prototype ID ${esc(jetaiOf(job).prototype_id)}" data-key="copy-prototype">${icon('copy')}</button></span>`] : null,
+      jetaiOf(job).error ? ['JetAI upload', `<span class="text-attention">${esc(jetaiOf(job).error)}</span>`] : null,
+      requestedAt(job) ? ['Requested', esc(`${stamp(requestedAt(job))}${dataOf(job).generate_requested_by ? ' by ' + dataOf(job).generate_requested_by : ''}`)] : null,
       contactForm ? ['Contact form', `<a href="${esc(contactForm)}" target="_blank" rel="noopener noreferrer">${esc(shortUrl(contactForm))}</a>`] : null,
       ['Batch', batch ? `<button type="button" class="link-btn" data-set-batch="${esc(batch.id)}" data-close-drawer data-key="details-batch">${esc(batchName(batch))}</button>` : esc(job.batch_id)],
       ['Worker', job.worker ? `<code>${esc(job.worker)}</code>` : 'Unassigned'],
+      typeof dataOf(job).site_file === 'string' && dataOf(job).site_file ? ['Website file', `<span class="file-path"><code>${esc(dataOf(job).site_file)}</code><button type="button" class="icon-btn icon-btn-sm" data-copy-value="${esc(dataOf(job).site_file)}" data-copy-label="File path" aria-label="Copy file path" title="Copy file path" data-key="copy-file">${icon('copy')}</button></span>`] : null,
       ['Last change', esc(stamp(job.updated_at))],
       job.data_error ? ['Ledger warning', esc(job.data_error)] : null,
     ].filter(Boolean);
@@ -671,6 +774,10 @@
       if (!result.unchanged) {
         applyState(result);
         lastFullFetch = Date.now();
+      } else if (data && JSON.stringify(result.generator || null) !== JSON.stringify(data.generator || null)) {
+        data.generator = result.generator || null;
+        renderGenerator();
+        if ($('#drawer').open) renderDrawer();
       }
       setSync('live', 'Live');
     }).catch(error => {
@@ -697,10 +804,16 @@
       events: Array.isArray(next.events) ? next.events : [],
       workers: Array.isArray(next.workers) ? next.workers : [],
       settings: next.settings || {},
+      generator: next.generator || null,
       viewer: next.viewer || {},
       sheet_url: next.sheet_url || '',
     };
     render();
+    if (pendingOpen && jobsById().has(pendingOpen)) {
+      const id = pendingOpen;
+      pendingOpen = null;
+      openJob(id);
+    }
     if (ui.job && $('#drawer').open) loadActivity(ui.job);
   }
 
@@ -811,9 +924,18 @@
   const batchDialog = $('#batch-dialog');
   const batchForm = $('#batch-form');
 
+  function syncMode() {
+    const targets = batchForm.elements.mode.value === 'targets';
+    $('#count-label').textContent = targets ? 'Targets to find' : 'Websites to finish';
+    $('#count-hint').textContent = targets
+      ? 'From 1 to 100 qualified businesses. Nothing is built until you press Generate on one.'
+      : 'From 1 to 100. Only finished websites count — skipped businesses are replaced.';
+  }
+
   function openBatchDialog() {
     batchForm.reset();
     batchForm.elements.requested_count.value = '5';
+    syncMode();
     $$('[aria-invalid]', batchForm).forEach(field => field.removeAttribute('aria-invalid'));
     $('#batch-error').textContent = '';
     batchForm.hidden = false;
@@ -841,6 +963,7 @@
     if (step || preset) syncPresets();
   });
   batchForm.elements.requested_count.addEventListener('input', syncPresets);
+  batchForm.addEventListener('change', event => { if (event.target.name === 'mode') syncMode(); });
   batchForm.elements.requested_count.addEventListener('blur', event => {
     if (event.target.value !== '') event.target.value = clampCount(event.target.value);
     syncPresets();
@@ -851,6 +974,7 @@
     const industry = batchForm.elements.industry.value.trim();
     const city = batchForm.elements.city.value.trim();
     const count = Number(batchForm.elements.requested_count.value);
+    const mode = batchForm.elements.mode.value === 'targets' ? 'targets' : 'build';
     const problems = [];
     batchForm.elements.industry.setAttribute('aria-invalid', String(!industry));
     batchForm.elements.city.setAttribute('aria-invalid', String(!city));
@@ -868,9 +992,9 @@
     submit.disabled = true;
     submit.textContent = 'Queuing…';
     $('#batch-error').textContent = '';
-    server('queueBatch', { industry, city, requested_count: count }, accessKey).then(result => {
-      const batch = { id: result.id, industry, city, requested_count: result.requested_count };
-      $('#batch-done-summary').textContent = `${industry} · ${city} · ${plural(result.requested_count, 'website')}`;
+    server('queueBatch', { industry, city, requested_count: count, mode }, accessKey).then(result => {
+      const batch = { id: result.id, industry, city, requested_count: result.requested_count, mode: result.mode || mode };
+      $('#batch-done-summary').textContent = `${industry} · ${city} · ${batchMode(batch) === 'targets' ? plural(result.requested_count, 'target') + ' to find' : plural(result.requested_count, 'website')}`;
       $('#batch-prompt').textContent = runPrompt(batch);
       batchForm.hidden = true;
       $('#batch-done').hidden = false;
@@ -895,6 +1019,86 @@
     $(box).textContent = '';
     if (event.target.hasAttribute('aria-invalid')) event.target.removeAttribute('aria-invalid');
   }));
+
+  // ---------------------------------------------------------------------------
+  // Add website and Generate
+
+  const targetDialog = $('#target-dialog');
+  const targetForm = $('#target-form');
+
+  function syncTargetSubmit() {
+    $('#target-submit').textContent = targetForm.elements.generate.checked ? 'Add and generate' : 'Add website';
+  }
+
+  function openTargetDialog(batchId) {
+    targetForm.reset();
+    $('#target-error').textContent = '';
+    $$('[aria-invalid]', targetForm).forEach(field => field.removeAttribute('aria-invalid'));
+    const lists = data ? data.batches.filter(batch => !isHandPicked(batch) && !['cancelled', 'complete', 'exhausted'].includes(batch.status)) : [];
+    const select = $('#target-batch');
+    select.innerHTML = '<option value="">Hand-picked websites</option>' + lists.slice().reverse().map(batch => `<option value="${esc(batch.id)}">${esc(batchName(batch))}${batch.available_count ? '' : ' (full)'}</option>`).join('');
+    const scoped = batchById(batchId || '');
+    select.value = scoped && !isHandPicked(scoped) && lists.includes(scoped) ? scoped.id : '';
+    syncTargetSubmit();
+    if (!targetDialog.open) targetDialog.showModal();
+    targetForm.elements.name.focus();
+  }
+
+  targetForm.addEventListener('change', event => { if (event.target.name === 'generate') syncTargetSubmit(); });
+  targetForm.addEventListener('input', event => {
+    $('#target-error').textContent = '';
+    if (event.target.hasAttribute('aria-invalid')) event.target.removeAttribute('aria-invalid');
+  });
+  targetForm.addEventListener('submit', event => {
+    event.preventDefault();
+    const name = targetForm.elements.name.value.trim();
+    const url = targetForm.elements.url.value.trim();
+    const generate = targetForm.elements.generate.checked;
+    targetForm.elements.name.setAttribute('aria-invalid', String(!name));
+    const urlValid = /^(https?:\/\/)?[^\s/]+\.[^\s/]+/i.test(url);
+    targetForm.elements.url.setAttribute('aria-invalid', String(!urlValid));
+    if (!name || !urlValid) {
+      $('#target-error').textContent = !name ? 'Add the business name.' : 'Add the address of its current website, like brightsparkelectric.com.';
+      (targetForm.querySelector('[aria-invalid="true"]') || targetForm.elements.name).focus();
+      return;
+    }
+    const submit = $('#target-submit');
+    submit.disabled = true;
+    submit.textContent = 'Adding…';
+    server('addTarget', { name, url, batch_id: targetForm.elements.batch_id.value, generate }, accessKey).then(result => {
+      targetDialog.close();
+      toast(generate ? `${name} added · the website generator will build it` : `${name} added to the list`);
+      ui.filter = 'all';
+      poll(true);
+      pendingOpen = result.id;
+    }).catch(error => {
+      if (isAccessError(error)) {
+        targetDialog.close();
+        showLock(error);
+        return;
+      }
+      const message = errorText(error);
+      $('#target-error').textContent = /UNIQUE constraint/.test(message) ? 'That business is already in the ledger (same website, phone or email).' : message;
+    }).then(() => {
+      submit.disabled = false;
+      syncTargetSubmit();
+    });
+  });
+
+  function requestGenerate(button) {
+    const id = button.getAttribute('data-generate');
+    const job = jobsById().get(id);
+    button.disabled = true;
+    server('requestWebsite', id, accessKey).then(() => {
+      const state = generatorState();
+      toast(state.ready ? `Generating ${job ? job.name : 'the website'}…` : `Requested · ${state.online ? 'the generator needs setup first' : 'start the website generator to build it'}`, state.ready ? 'ok' : 'error');
+      poll(true);
+    }).catch(error => {
+      button.disabled = false;
+      if (isAccessError(error)) showLock(error);
+      else toast(errorText(error), 'error');
+    });
+  }
 
   // ---------------------------------------------------------------------------
   // Cancel batch
@@ -982,6 +1186,17 @@
       if (filter.classList.contains('kpi') && panel.getBoundingClientRect().top > window.innerHeight * 0.6) panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
       return;
     }
+    const generate = target.closest('[data-generate]');
+    if (generate) {
+      requestGenerate(generate);
+      return;
+    }
+    const addWebsite = target.closest('[data-add-website]');
+    if (addWebsite) {
+      if ($('#drawer').open) $('#drawer').close();
+      openTargetDialog(addWebsite.getAttribute('data-add-website'));
+      return;
+    }
     const prompt = target.closest('[data-copy-prompt]');
     if (prompt) {
       const batch = batchById(prompt.getAttribute('data-copy-prompt'));
@@ -1059,6 +1274,7 @@
   }));
 
   $('#new-batch').addEventListener('click', openBatchDialog);
+  $('#add-website').addEventListener('click', () => openTargetDialog(ui.batch === 'all' ? '' : ui.batch));
   $('#batch-select').addEventListener('change', event => setBatch(event.target.value));
   $('#sort-select').addEventListener('change', event => {
     ui.sort = event.target.value;

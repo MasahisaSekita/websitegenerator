@@ -59,6 +59,7 @@
           <a class="icon-btn" id="sheet-link" hidden target="_blank" rel="noopener noreferrer" aria-label="Open the ledger sheet" title="Open the ledger sheet"><svg class="icon" aria-hidden="true"><use href="#i-sheet"></use></svg></a>
           <button class="icon-btn" id="forget-key" type="button" hidden aria-label="Lock this dashboard on this device" title="Lock this dashboard on this device"><svg class="icon" aria-hidden="true"><use href="#i-lock"></use></svg></button>
           <button class="icon-btn" id="theme-toggle" type="button" aria-label="Switch between light and dark theme" title="Switch theme"><svg class="icon theme-sun" aria-hidden="true"><use href="#i-sun"></use></svg><svg class="icon theme-moon" aria-hidden="true"><use href="#i-moon"></use></svg></button>
+          <button class="btn btn-secondary" id="add-website" type="button" title="Add a business by its website address"><svg class="icon" aria-hidden="true"><use href="#i-globe"></use></svg><span class="btn-text">Add website</span></button>
           <button class="btn btn-primary" id="new-batch" type="button"><svg class="icon" aria-hidden="true"><use href="#i-plus"></use></svg><span class="btn-text">New batch</span></button>
         </div>
       </div>
@@ -74,6 +75,7 @@
       </div>
 
       <div class="notice" id="notice" hidden></div>
+      <div class="notice" id="generator-notice" hidden></div>
 
       <section class="kpis" id="kpis" aria-label="Summary">
         <div class="kpi is-skeleton"><span class="skeleton sk-label"></span><span class="skeleton sk-value"></span><span class="skeleton sk-sub"></span></div>
@@ -125,7 +127,11 @@
           </div>
         </section>
 
-        <aside class="side" aria-label="Batches, workers and activity">
+        <aside class="side" aria-label="Website generator, batches, workers and activity">
+          <section class="panel" aria-labelledby="generator-heading">
+            <div class="panel-head"><h2 id="generator-heading"><svg class="icon" aria-hidden="true"><use href="#i-sparkle"></use></svg>Website generator</h2><span class="panel-note" id="generator-note"></span></div>
+            <div class="generator" id="generator"></div>
+          </section>
           <section class="panel" aria-labelledby="batches-heading">
             <div class="panel-head"><h2 id="batches-heading"><svg class="icon" aria-hidden="true"><use href="#i-layers"></use></svg>Batches</h2><span class="panel-note" id="batches-note"></span></div>
             <div class="batch-list" id="batches"></div>
@@ -182,11 +188,18 @@
       <div class="modal-head">
         <div>
           <h2 id="batch-dialog-title">New batch</h2>
-          <p>The Codex coordinator finds local businesses with weak websites, builds each one a preview and sends your outreach.</p>
+          <p>Claude Code finds local businesses with weak websites and builds each one a new website.</p>
         </div>
         <button type="button" class="icon-btn" data-close aria-label="Close"><svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg></button>
       </div>
       <div class="modal-fields">
+        <fieldset class="field fieldset">
+          <legend class="field-label">What should Claude Code do?</legend>
+          <div class="choices">
+            <label class="choice"><input type="radio" name="mode" value="build" checked><b>Find and build</b><span>Builds a website for every qualified business it finds.</span></label>
+            <label class="choice"><input type="radio" name="mode" value="targets"><b>Only find targets</b><span>Lists qualified businesses; you press Generate on the ones you want.</span></label>
+          </div>
+        </fieldset>
         <label class="field">
           <span class="field-label">Industry</span>
           <input name="industry" list="industry-options" maxlength="120" autocomplete="off" placeholder="Electricians" required>
@@ -196,7 +209,7 @@
           <input name="city" list="city-options" maxlength="120" autocomplete="off" placeholder="Boston, MA" required>
         </label>
         <div class="field">
-          <span class="field-label" id="count-label">Websites with outreach sent</span>
+          <span class="field-label" id="count-label">Websites to finish</span>
           <div class="count-row">
             <div class="stepper">
               <button type="button" data-step="-1" aria-label="Fewer websites">−</button>
@@ -210,7 +223,7 @@
               <button type="button" data-preset="50">50</button>
             </div>
           </div>
-          <span class="field-hint">From 1 to 100. Only sent outreach counts — skipped businesses are replaced.</span>
+          <span class="field-hint" id="count-hint">From 1 to 100. Only finished websites count — skipped businesses are replaced.</span>
         </div>
       </div>
       <p class="form-error" id="batch-error" role="alert"></p>
@@ -228,7 +241,7 @@
         </div>
       </div>
       <div class="field">
-        <span class="field-label">Next: ask Codex to run it</span>
+        <span class="field-label">Next: paste this into Claude Code, opened in the project folder</span>
         <pre class="prompt" id="batch-prompt"></pre>
       </div>
       <div class="modal-foot">
@@ -236,6 +249,38 @@
         <button type="button" class="btn btn-primary" data-close>Done</button>
       </div>
     </div>
+  </dialog>
+
+  <dialog class="modal" id="target-dialog" aria-labelledby="target-title">
+    <form class="modal-form" id="target-form" novalidate>
+      <div class="modal-head">
+        <div>
+          <h2 id="target-title">Add a website</h2>
+          <p>The website generator reads the business's current website and builds a new one-page website from its real content, then uploads it to JetAI as a draft.</p>
+        </div>
+        <button type="button" class="icon-btn" data-close aria-label="Close"><svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg></button>
+      </div>
+      <div class="modal-fields">
+        <label class="field">
+          <span class="field-label">Business name</span>
+          <input name="name" maxlength="200" autocomplete="off" placeholder="Bright Spark Electric" required>
+        </label>
+        <label class="field">
+          <span class="field-label">Current website</span>
+          <input name="url" maxlength="300" autocomplete="off" inputmode="url" spellcheck="false" placeholder="brightsparkelectric.com" required>
+        </label>
+        <label class="field">
+          <span class="field-label">Add it to</span>
+          <select name="batch_id" id="target-batch"><option value="">Hand-picked websites</option></select>
+        </label>
+        <label class="check"><input type="checkbox" name="generate" checked><span><b>Generate the website now</b><small>Otherwise it waits in the list until you press Generate.</small></span></label>
+      </div>
+      <p class="form-error" id="target-error" role="alert"></p>
+      <div class="modal-foot">
+        <button type="button" class="btn btn-ghost" data-close>Cancel</button>
+        <button type="submit" class="btn btn-primary" id="target-submit">Add and generate</button>
+      </div>
+    </form>
   </dialog>
 
   <dialog class="modal" id="cancel-dialog" aria-labelledby="cancel-title">

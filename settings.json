@@ -1,14 +1,38 @@
 {
   "template": "templates/electrician",
-  "template_name": "Electrician \u00b7 English template",
+  "template_name": "Electrician · English template",
   "template_edit_policy": "business-details-and-theme-only",
   "dashboard_port": 4310,
   "batch_size": 5,
   "requested_workers": 5,
+  "delivery": "file",
+  "build_mode": "html",
+  "website_prompt": "references/website-prompt.md",
+  "jetai": {
+    "upload": true,
+    "api_base": "https://slides.yobolabs.ai/api/v1",
+    "env_file": ".env",
+    "key_name": "JETAI_API_KEY",
+    "target": "prototype",
+    "publish": false,
+    "site_id": null,
+    "app_url": ""
+  },
+  "generator": {
+    "model": "sonnet",
+    "max_parallel": 2,
+    "poll_seconds": 10,
+    "max_turns": 40,
+    "timeout_minutes": 20,
+    "repair_rounds": 2,
+    "scrape_pages": 3,
+    "claude_cli": ""
+  },
+  "worker_model": "sonnet",
   "vercel_scope": "albertshineys-projects",
   "vercel_cli": [
-    "pnpm",
-    "dlx",
+    "npx",
+    "--yes",
     "vercel@59.16.0"
   ],
   "firecrawl_env_file": ".env",
@@ -23,6 +47,7 @@
   },
   "outreach": {
     "submit_by_default": true,
+    "operator_approval_required": true,
     "include_preview_link": true,
     "language": "en",
     "offer": "Website is free; the business pays for hosting.",
@@ -32,14 +57,10 @@
     "complete_after_submit": true,
     "message_mode": "fixed"
   },
-  "worker_model": "gpt-5.6-terra",
-  "worker_reasoning_effort": "low",
-  "visible_worker_browsers": true,
-  "build_mode": "quick-template",
   "default_template": "electrician",
   "templates": {
     "electrician": {
-      "name": "Electrician \u00b7 base design",
+      "name": "Electrician · base design",
       "path": "templates/electrician"
     }
   },

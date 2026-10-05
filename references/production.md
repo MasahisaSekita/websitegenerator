@@ -1,58 +1,127 @@
-# Fast template production
+# Website production
 
-On Windows, use `python` for `python3` and `.\website.bat` for `./website` (see “Running on Windows” in SKILL.md).
+On Windows, use `python` in place of `python3`, or the full interpreter path when `python` is the Microsoft Store placeholder (see “Running on Windows” in SKILL.md).
 
-## Generate a website
+`build_mode` in `settings.json` is `html`. Each website is one self-contained HTML page written from the business's own website: its real services, wording, contact details and photos, following [the website prompt](website-prompt.md). There is no Node, React or build step. Later these pages connect to an HTML and Apps Script backend; for now their contact form only opens the visitor's email app.
 
-The AI chooses an available industry template with `python3 tools/quick_site.py templates`. Electrician is the first template: the base layout, generic English copy, English routes and reusable stock imagery. Personalization changes the business name, phone/email, address and one theme color only.
+## One business, step by step
+
+Run these from the application root with the job's owner ID (for example `builder-JOB_ID`).
+
+1. **Prepare.** This moves the job reviewing → extracting → building.
+
+   ```sh
+   python3 tools/site_runner.py prepare --job JOB_ID --worker OWNER_ID --evidence runs/scouting/BATCH_ID/cache/DOMAIN
+   ```
+
+   - With `--evidence`, it reuses the cached Firecrawl pages from screening.
+   - Without it, it scrapes the homepage (with a screenshot) and up to two inner pages (services, about, contact) into `runs/JOB_ID/evidence/`.
+   - It writes `runs/JOB_ID/brief.md` and `brief.json`, and downloads up to 12 of the business's own photos into `runs/JOB_ID/site/assets/`, logos and the largest photos first.
+   - The brief lists the contact details with their sources, the address, hours lines, links, the brand colors used in the site's code, the photos, and the cleaned page text.
+2. **Write the page.** Follow [website-prompt.md](website-prompt.md) and write `runs/JOB_ID/site/index.html`.
+3. **Check it** and fix everything listed:
+
+   ```sh
+   python3 tools/html_site.py check --file runs/JOB_ID/site/index.html --name "NAME" --phone "PHONE" --email "EMAIL" --image-host DOMAIN
+   ```
+
+4. **Finish.** This checks again, embeds the photos and writes the single-file website `runs/JOB_ID/NAME.html`.
+
+   ```sh
+   python3 tools/site_runner.py finish --job JOB_ID --worker OWNER_ID
+   ```
+
+   - It then uploads the file to JetAI as a draft prototype and moves the job checking → delivered with `qa_passed`, `site_file`, `workspace` and `jetai`.
+   - If the checker still finds problems, the job goes back to building with the first problem in its detail. Fix them and run `finish` again.
+   - `--no-upload` skips JetAI.
+   - A failed upload still delivers the file, and records the error in `jetai.error` and the job detail.
+
+The website generator, which runs the dashboard's Generate buttons, follows the same steps: `python3 tools/site_runner.py run --job JOB_ID` for one job, or `watch` to serve Generate requests. Headless Claude Code writes the page there, and the generator sends checker problems back to it for up to `generator.repair_rounds` more passes.
+
+## What the checker enforces
+
+- **Head and structure.**
+  - `<!doctype html>`, `lang`, UTF-8, a viewport, a title and a meta description.
+  - `noindex, nofollow`, because these are unsolicited previews.
+  - Exactly one `<h1>`.
+- **Business details.**
+  - The business name appears in the title and on the page.
+  - A tap-to-call link for the phone number and a `mailto:` link for the email, when the old site linked to them or showed them on two or more pages.
+- **External resources.**
+  - No external scripts, frames (except a Google Maps embed), stylesheets other than Google Fonts, `@import`, `<base>`, forms that post anywhere, `javascript:` links or meta refresh.
+  - Inline scripts may not make network requests, use storage or redirect, except to open a `mailto:` draft.
+- **Images.**
+  - Images come from `site/assets/` or the business's own https domain, and every `<img>` has `alt`.
+- **Content.**
+  - Every `href="#id"` has a matching `id`.
+  - No placeholder text or `example.com` links.
+- **Size.**
+  - Markup and CSS under 400,000 characters before the photos are embedded.
+  - The finished file under 4,800,000 characters (JetAI accepts 5,000,000).
+  - Embedded photos are limited to 3 MB.
+
+The checker can't judge truthfulness or design quality. The page writer's own review against the prompt's checklist covers those.
+
+## JetAI
+
+- **Where uploads go.** To JetAI prototypes at `jetai.api_base` (`https://slides.yobolabs.ai/api/v1`), with `Authorization: Bearer` and the key `JETAI_API_KEY` from `.env`. The key is never printed, logged or written to the ledger.
+- **What an upload looks like.**
+  - Each website is an `html` prototype named `NAME · website preview`, with a slug of the business name plus the end of the job ID.
+  - Generating the same business again replaces that prototype's html instead of creating another one.
+  - A taken name or slug gets a numbered variant.
+- **Drafts and publishing.**
+  - Uploads stay drafts, visible only inside the JetAI organization.
+  - Publishing makes the page public. Do it only when the operator asks for that business: `python3 tools/jetai.py publish --id PROTOTYPE_ID`, or set `jetai.publish` to `true` to publish every upload.
+- **Landing pages.** Microsites store their content as Puck component JSON, not HTML, so websites go to prototypes.
+- **Checks and links.**
+  - `python3 tools/jetai.py ping` checks the key and address (read-only).
+  - The API doesn't return a viewing link for prototypes. Set `jetai.app_url` to a link pattern such as `https://…/{id}` to show an "Open in JetAI" link in the dashboards.
+
+## Website generator settings
+
+The `generator` section of `settings.json`:
+
+| Setting | Meaning |
+|---|---|
+| `model` | The Claude Code model for headless builds |
+| `max_parallel` | Builds at once, 1–5 (each also needs a free ledger worker slot) |
+| `poll_seconds` | How often the watcher checks for requests |
+| `max_turns`, `timeout_minutes` | Limits for one Claude Code pass |
+| `repair_rounds` | Extra passes for checker problems |
+| `scrape_pages` | Pages read per business when no evidence exists |
+| `claude_cli` | Path to the Claude Code CLI. When empty, it uses `claude` on PATH or the copy bundled with the Claude desktop app |
+
+Headless Claude Code runs restricted, with these flags:
+
+- `--restricted`: file tools only, confined to the job folder.
+- `--strict-mcp-config`: no MCP connectors.
+- `--permission-prompts none`: anything that would need approval is refused.
+
+The page writer reads untrusted scraped text, so it gets no shell, web access or connectors. It must be signed in once with `claude auth login`, or be given `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` in the environment. `python3 tools/site_runner.py doctor` checks everything without changing anything.
+
+## Legacy template mode
+
+`build_mode: quick-template` is the earlier volume mode. It uses `templates/electrician/` (a prebuilt React site) with only the business name, phone, email, address and theme color changed:
 
 ```sh
-./website --template electrician --name "Bright Electrical" --theme-color "#2563eb" --phone "+44 20 7946 0958" --email "hello@business.com" --street "10 High Street" --city "London"
+./website --template electrician --name "Bright Electrical" --theme-color "#2563eb" --phone "+44 20 7946 0958" --email "hello@business.com"
 ```
 
-`--theme-color "#2563eb"` sets the business color. The AI selects this color from the business’s logo/brand, or uses a suitable industry fallback if no clear brand color exists. Do not ask the user to choose it. JSON input uses `theme_color`. The prepared site automatically derives light/dark shades and updates buttons, highlights, borders, logo graphics and animations. All business-specific values live in the generated `site/business.js`; changing that configuration and reloading updates the entire site without rebuilding. Keep generic copy, photographs, layout and services unchanged per business.
-
-The AI collects the name, phone/email and address from the business website, records the source, chooses the color, and runs the command itself. Do not hand this command back to the user as the next step. Name and at least one contact method are required. Street, city and postcode (`--zip`) are optional. No hours, ratings, registration numbers or other unverified details are invented. The command validates inputs, creates an isolated unique directory, copies the prepared static build, and writes a safely encoded `business.js` file. It reports the output directory and measured generation time. Repeated names create separate sites and never overwrite previous sites. Generation uses no API, image search or npm subprocess.
-
-For a JSON array of business objects with the same fields:
-
-```sh
-python3 tools/quick_site.py batch businesses.json
-```
-
-After the command succeeds, continue directly to verification, deployment and outreach under the run’s authorization. The dashboard shows generated previews automatically; it is not an input form for business details or color. Local previews remain available while the dashboard is serving. Generated sites live under `runs/quick/ID/site/`; their business and image-provenance manifests live alongside the site. For an outreach job, record the generated folder in the existing ledger and proceed through the existing stages truthfully.
-
-## Prepare once after editing the template
-
-Edit `templates/electrician/`, preserving the template's visual design. User-facing copy and URLs are English. Stock images are bundled locally and described as illustrative, never as the prospect’s team or work. Their source and licence information is in `stock-images.json`; the imagery guidance comes from Albert’s `~/.claude/skills/build-premium-website/SKILL.md`.
-
-```sh
-python3 tools/quick_site.py prepare --template electrician
-```
-
-This installs dependencies only if absent, lints, builds and fingerprints the source. Generation refuses a missing or stale prepared build. Do full desktop/mobile and route QA after master edits, then reuse that verified build across businesses. Do not rebuild per business. Keep the original Delivery template and existing customer runs intact.
-
-## Verification and hosting boundary
-
-Check generated name, phone and email. Confirm English copy, responsive layout and working service/contact navigation after template changes. Forms remain clearly labelled previews and send nothing. Keep noindex on speculative previews. These are static React previews; generating a copy does not prerender each route or create a customer lead backend. Do not claim those capabilities.
-
-The approximately 30-second goal covers applying the collected details and creating a ready-to-host local site. Discovery, hosting latency, public verification and outreach take additional time. New template versions affect only future generated copies.
+It writes `runs/quick/ID/site/` and a single-file `runs/quick/ID/NAME.html`. After editing the template, run `python3 tools/quick_site.py prepare --template electrician` once. Use this mode only when the operator asks for it.
 
 ## Vercel
 
-Read-only preflight confirmed configuration should use the existing CLI wrapper (`pnpm dlx vercel@59.16.0`) and scope `albertshineys-projects`; recheck availability at runtime. Exact CLI behavior: [deploy](https://vercel.com/docs/cli/deploy), [global options](https://vercel.com/docs/cli/global-options). Firecrawl uses [v2 scrape](https://docs.firecrawl.dev/api-reference/endpoint/scrape).
+These steps apply only when `delivery` is `vercel`.
 
-Create a new project named `revamp-JOB_ID` from the exact `site` path returned by the generator (normally `runs/quick/GENERATED_ID/site`), with no copied `.vercel` folder or env variables. Link explicitly to that project and the configured scope using CLI help for installed syntax. For example, from the copy:
+1. Put the finished single-file website alone in a folder as `index.html`, for example `runs/JOB_ID/deploy/index.html`.
+2. Deploy that folder to a new project named `revamp-JOB_ID` in `vercel_scope`, using the command in `vercel_cli`:
 
-```sh
-pnpm dlx vercel@59.16.0 link --yes --project revamp-JOB_ID --scope albertshineys-projects
-pnpm dlx vercel@59.16.0 deploy --prod --yes --scope albertshineys-projects
-```
+   ```sh
+   npx --yes vercel@59.16.0 link --yes --project revamp-JOB_ID --scope VERCEL_SCOPE
+   npx --yes vercel@59.16.0 deploy --prod --yes --scope VERCEL_SCOPE
+   ```
 
-`--prod` is acceptable for this isolated concept project so the recipient receives a public URL; it must never refer to the business's real site or Delivery's existing platform/agency/client projects. Verify `.vercel/project.json` refers to the intended new project before deploying. The quick generator already outputs a complete static site. Deploy that `site/` directory with no install or build command. Its `vercel.json` provides the SPA fallback and noindex headers. Verify that `.vercel/project.json` belongs to the intended new isolated project before any subsequent deploy. Never run npm in the generated site or use the legacy per-business prerender workflow.
+3. Before deploying, verify that `.vercel/project.json` names the new project. Never touch existing projects, account settings or domains. Deployment protection that blocks visitors is a blocker; don't change account-wide settings.
+4. Verify the public URL without signing in before any outreach. Hosting prices aren't known from a deploy, so never promise a price, free hosting or a transfer.
 
-Capture and verify the returned URL. Open the homepage and a service route without session bypass cookies. If deployment protection blocks recipients, flag it; do not change account-wide protection settings. Do not send an inaccessible URL. Only ready/verified sites proceed to outreach. Hosting pricing is not known from a successful deploy; never promise a particular price, free hosting or automatic ownership transfer.
-
-## Continue through outreach
-
-After verifying the public preview, read `outreach.md`, copy its fixed message exactly with the public preview URL and optional subject business name, then submit it through the original business contact form. Record the attempt through `contact-begin` and `contact-finish` as documented. A draft or a local preview does not complete an authorized full run. If the original form cannot be used for an otherwise qualified business, finish its verified preview and [manual outreach handoff](manual-outreach.md), then continue the batch; do not silently switch to email or SMS.
+Then continue with [outreach](outreach.md), which needs the operator's approval for every submission.

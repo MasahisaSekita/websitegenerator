@@ -7,7 +7,19 @@ const label = (value) => String(value || 'queued').replace(/[_-]/g, ' ').replace
 const time = (value) => { const date = new Date(value); return Number.isNaN(date.getTime()) ? 'Time unavailable' : date.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }); };
 function safeURL(value) { try { const url = new URL(value); return ['http:', 'https:'].includes(url.protocol) ? url.href : null; } catch { return null; } }
 function isManual(job) { return job.stage === 'manual' || job.contact_status === 'manual_required' || job.data?.outreach_mode === 'manual'; }
-function stageLabel(job) { return isManual(job) ? (job.stage === 'manual' ? 'Manual outreach' : job.stage === 'queued' ? 'Manual · build queued' : `Manual · ${label(job.stage)}`) : label(job.stage); }
+const requestedAt = (job) => job.data?.generate_requested_at || '';
+function stageLabel(job) {
+  if (job.stage === 'queued' && !isManual(job)) return requestedAt(job) ? 'Requested' : 'Target';
+  return isManual(job) ? (job.stage === 'manual' ? 'Manual outreach' : job.stage === 'queued' ? 'Manual · build queued' : `Manual · ${label(job.stage)}`) : label(job.stage);
+}
+function generatorStatus() {
+  const status = state.generator;
+  const seen = status ? Date.parse(status.seen_at) : NaN;
+  if (!status || !Number.isFinite(seen) || Date.now() - seen > 90000) return { kind: 'off', text: '<b>Website generator: not running.</b> Start the dashboard without --no-generator, or run python tools/site_runner.py watch.' };
+  if (!status.ready) return { kind: 'setup', text: `<b>Website generator: needs setup.</b> ${escapeHTML(status.note || '')}` };
+  const running = Array.isArray(status.running) ? status.running.length : 0;
+  return { kind: 'ready', text: `<b>Website generator: ${running ? `building ${running}` : 'ready'}.</b> Press Generate on a target to build its website.` };
+}
 function contactLink(value, kind) {
   if (typeof value !== 'string' || !value.trim()) return 'Unavailable';
   const text = value.trim();
@@ -25,8 +37,9 @@ function manualOutreach(job) {
 }
 function category(job) {
   if (isManual(job)) return 'manual';
+  if (job.stage === 'queued') return 'target';
   if (['failed', 'blocked', 'uncertain', 'needs_attention', 'error', 'rejected', 'skipped'].includes(job.stage)) return 'attention';
-  if (['submitted', 'sent', 'contacted'].includes(job.contact_status) || ['contacted', 'complete', 'completed', 'sent'].includes(job.stage)) return 'contacted';
+  if (['submitted', 'sent', 'contacted'].includes(job.contact_status) || ['contacted', 'complete', 'completed', 'sent', 'delivered'].includes(job.stage)) return 'contacted';
   if (job.preview_url || ['published', 'deployed', 'ready'].includes(job.stage)) return 'ready';
   return 'working';
 }
@@ -38,14 +51,16 @@ function render() {
   select.value = batchFilter;
   const allJobs = state.jobs.filter(job => batchFilter === 'all' || String(job.batch_id) === batchFilter);
   const jobs = allJobs.filter(job => stageFilter === 'all' || category(job) === stageFilter);
-  $('#edition-count').textContent = String(state.jobs.filter(job => ['complete', 'sent'].includes(job.stage)).length).padStart(2, '0');
+  $('#edition-count').textContent = String(state.jobs.filter(job => ['complete', 'sent', 'delivered'].includes(job.stage)).length).padStart(2, '0');
   $('#sheet-count').textContent = jobs.length;
   $('#manual-count').textContent = allJobs.filter(isManual).length;
   const maxWorkers = Math.max(1, Number(state.settings.max_workers) || 3);
   const selectedBatch = batches.find(batch => String(batch.id) === batchFilter);
-  const target = selectedBatch ? Number(selectedBatch.requested_count) || 5 : batches.reduce((sum, batch) => sum + (Number(batch.requested_count) || 5), 0);
-  const completed = allJobs.filter(job => ['complete', 'sent'].includes(job.stage)).length;
-  $('#capacity-note').textContent = `${completed}/${target} completed · ${maxWorkers} parallel`;
+  // The hand-picked list has 100 nominal slots; it is not a target to reach.
+  const counted = batches.filter(batch => batch.industry !== 'Hand-picked websites');
+  const target = selectedBatch ? (selectedBatch.industry === 'Hand-picked websites' ? 0 : Number(selectedBatch.requested_count) || 5) : counted.reduce((sum, batch) => sum + (Number(batch.requested_count) || 5), 0);
+  const completed = allJobs.filter(job => ['complete', 'sent', 'delivered'].includes(job.stage)).length;
+  $('#capacity-note').textContent = `${target ? `${completed}/${target}` : completed} completed · ${maxWorkers} parallel`;
   const activeWorkers = state.workers.filter(worker => worker.job_id && !['idle', 'complete', 'completed', 'stopped'].includes(worker.status));
   const assigned = new Set();
   $('#workers').innerHTML = Array.from({ length: maxWorkers }, (_, index) => {
@@ -59,16 +74,21 @@ function render() {
     return `<div class="worker ${busy ? 'busy' : ''}"${busy ? ` data-updated-at="${escapeHTML(worker.updated_at || '')}"` : ''}><div class="worker-number">SLOT ${String(index + 1).padStart(2, '0')} <span class="worker-dot" aria-hidden="true"></span></div><div class="worker-title">${escapeHTML(title)}</div><div class="worker-detail">${escapeHTML(detail)}</div>${busy ? '<div class="worker-age" role="status" aria-live="polite" hidden></div>' : ''}</div>`;
   }).join('');
   refreshWorkerAges();
+  const generator = generatorStatus();
+  const requested = allJobs.filter(requestedAt).length;
+  $('#generator-status').className = `generator-status ${generator.kind}`;
+  $('#generator-status').innerHTML = generator.text + (requested ? ` ${requested} requested.` : '');
   const queuedBatches = batches.filter(batch => (batchFilter === 'all' || String(batch.id) === batchFilter) && ['queued', 'pending'].includes(batch.status));
   $('#queue-status').hidden = !queuedBatches.length;
-  $('#queue-status').textContent = `${queuedBatches.length} batch${queuedBatches.length === 1 ? '' : 'es'} queued. Ask Codex to run them.`;
+  $('#queue-status').textContent = `${queuedBatches.length} batch${queuedBatches.length === 1 ? '' : 'es'} queued. Run them in Claude Code.`;
   if (!jobs.length) {
     const filtered = state.jobs.length > 0 && (batchFilter !== 'all' || stageFilter !== 'all');
     $('#jobs').innerHTML = `<div class="empty"><div><div class="empty-mark" aria-hidden="true">✳</div><h3>${filtered ? 'No matches' : 'No businesses yet'}</h3><p>${filtered ? 'Try another filter.' : 'Queue your first batch above.'}</p></div></div>`;
   } else {
     $('#jobs').innerHTML = jobs.map((job, index) => {
       const initials = String(job.name || '?').split(/\s+/).slice(0, 2).map(part => part[0]).join('').toUpperCase();
-      return `<button class="job-card${isManual(job) ? ' manual-card' : ''}" data-job="${escapeHTML(job.id)}" aria-label="Open ${escapeHTML(job.name || 'prospect')} details"><div class="job-cover"><span class="job-number">${String(index + 1).padStart(2, '0')}</span><span class="cover-monogram" aria-hidden="true">${escapeHTML(initials)}</span><span class="cover-caption">${isManual(job) ? 'Manual contact needed' : job.preview_url ? 'Live ↗' : ''}</span></div><div class="job-info"><h3>${escapeHTML(job.name || 'Unnamed prospect')}</h3><div class="job-domain">${escapeHTML(job.domain || job.url || 'Website pending')}</div><p class="job-detail">${escapeHTML(job.detail || job.reason || 'Queued')}</p><div class="job-bottom"><span class="stage ${category(job)}">${escapeHTML(stageLabel(job))}</span><span class="job-arrow" aria-hidden="true">↗</span></div></div></button>`;
+      const caption = isManual(job) ? 'Manual contact needed' : job.preview_url ? 'Live ↗' : job.data?.jetai?.prototype_id ? 'In JetAI' : category(job) === 'target' && !requestedAt(job) ? 'Open to generate' : '';
+      return `<button class="job-card${isManual(job) ? ' manual-card' : ''}" data-job="${escapeHTML(job.id)}" aria-label="Open ${escapeHTML(job.name || 'prospect')} details"><div class="job-cover"><span class="job-number">${String(index + 1).padStart(2, '0')}</span><span class="cover-monogram" aria-hidden="true">${escapeHTML(initials)}</span><span class="cover-caption">${caption}</span></div><div class="job-info"><h3>${escapeHTML(job.name || 'Unnamed prospect')}</h3><div class="job-domain">${escapeHTML(job.domain || job.url || 'Website pending')}</div><p class="job-detail">${escapeHTML(job.detail || (job.reason ? `Qualified: ${job.reason}` : '') || 'Not built yet')}</p><div class="job-bottom"><span class="stage ${category(job)}">${escapeHTML(stageLabel(job))}</span><span class="job-arrow" aria-hidden="true">↗</span></div></div></button>`;
     }).join('');
   }
   if (selectedJob && $('#job-dialog').open) renderDialog();
@@ -93,7 +113,13 @@ function renderDialog() {
   if (!job) return;
   const original = safeURL(job.url), preview = safeURL(job.preview_url);
   const events = state.events.filter(event => String(event.job_id) === String(job.id)).sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-  $('#dialog-content').innerHTML = `<h2 id="dialog-title">${escapeHTML(job.name)}</h2><span class="stage ${category(job)}">${escapeHTML(stageLabel(job))}</span><div class="dialog-links">${original ? `<a href="${escapeHTML(original)}" target="_blank" rel="noopener noreferrer">Original ↗</a>` : ''}${preview ? `<a class="preview" href="${escapeHTML(preview)}" target="_blank" rel="noopener noreferrer">Preview ↗</a>` : ''}</div>${manualOutreach(job)}<section class="dialog-section"><div class="meta-label">Progress</div><p>${escapeHTML(job.detail || 'Waiting for an update from the coordinator.')}</p><div class="meta-label">Worker · updated</div><p>${escapeHTML(job.worker || 'Unassigned')} / ${escapeHTML(time(job.updated_at))}</p></section>${job.reason ? `<section class="dialog-section"><div class="meta-label">Reason</div><p>${escapeHTML(job.reason)}</p></section>` : ''}<section class="dialog-section"><div class="meta-label">Outreach</div><p>${escapeHTML(label(job.contact_status || 'not submitted'))}</p></section><section class="dialog-section"><div class="meta-label">Activity</div>${events.length ? `<ol class="timeline">${events.map(event => `<li>${escapeHTML(event.message)}<time class="timeline-time">${escapeHTML(time(event.created_at))}</time></li>`).join('')}</ol>` : '<p>No recorded activity yet.</p>'}</section>`;
+  const jetai = job.data?.jetai || {};
+  const target = job.stage === 'queued' && !job.worker;
+  const jetaiLink = safeURL(jetai.url || jetai.app_url);
+  const actions = target ? (requestedAt(job) ? `<p class="queue-status">Waiting for the website generator. ${generatorStatus().kind === 'ready' ? 'It will start shortly.' : 'It is not ready yet; see the status under Workers.'}</p>` : '<div class="dialog-actions"><button class="primary" id="generate-job" type="button">Generate website <span aria-hidden="true">✦</span></button></div>') : '';
+  const jetaiLine = jetai.prototype_id ? `<div class="meta-label">JetAI prototype</div><p>${escapeHTML(jetai.name || 'Website preview')} · ${escapeHTML(jetai.status || 'draft')} · <span class="file-line">${escapeHTML(jetai.prototype_id)}</span>${jetaiLink ? ` · <a href="${escapeHTML(jetaiLink)}" target="_blank" rel="noopener noreferrer">Open ↗</a>` : ''}</p>` : jetai.error ? `<div class="meta-label">JetAI upload</div><p>${escapeHTML(jetai.error)}</p>` : '';
+  const delivered = job.data?.site_file ? `<section class="dialog-section"><div class="meta-label">Website file</div><p class="file-line">${escapeHTML(job.data.site_file)}</p>${jetaiLine}</section>` : '';
+  $('#dialog-content').innerHTML = `<h2 id="dialog-title">${escapeHTML(job.name)}</h2><span class="stage ${category(job)}">${escapeHTML(stageLabel(job))}</span>${actions}<div class="dialog-links">${original ? `<a href="${escapeHTML(original)}" target="_blank" rel="noopener noreferrer">Original ↗</a>` : ''}${preview ? `<a class="preview" href="${escapeHTML(preview)}" target="_blank" rel="noopener noreferrer">Preview ↗</a>` : ''}</div>${manualOutreach(job)}${delivered}<section class="dialog-section"><div class="meta-label">Progress</div><p>${escapeHTML(job.detail || 'Waiting for an update from the coordinator.')}</p><div class="meta-label">Worker · updated</div><p>${escapeHTML(job.worker || 'Unassigned')} / ${escapeHTML(time(job.updated_at))}</p></section>${job.reason ? `<section class="dialog-section"><div class="meta-label">Reason</div><p>${escapeHTML(job.reason)}</p></section>` : ''}<section class="dialog-section"><div class="meta-label">Outreach</div><p>${escapeHTML(label(job.contact_status || 'not submitted'))}</p></section><section class="dialog-section"><div class="meta-label">Activity</div>${events.length ? `<ol class="timeline">${events.map(event => `<li>${escapeHTML(event.message)}<time class="timeline-time">${escapeHTML(time(event.created_at))}</time></li>`).join('')}</ol>` : '<p>No recorded activity yet.</p>'}</section>`;
 }
 async function poll() {
   try {
@@ -102,6 +128,7 @@ async function poll() {
     const data = await response.json();
     for (const key of ['batches', 'jobs', 'events', 'workers']) state[key] = Array.isArray(data[key]) ? data[key] : [];
     state.settings = data.settings || state.settings;
+    state.generator = data.generator || null;
     const signature = JSON.stringify(state);
     connected = true;
     $('#connection').className = 'connection online';
@@ -117,19 +144,36 @@ async function poll() {
 $('#batch-form').addEventListener('submit', async (event) => {
   event.preventDefault();
   const form = event.currentTarget, button = form.querySelector('button');
-  const industry = form.elements.industry.value.trim(), city = form.elements.city.value.trim(), requestedCount = Number(form.elements.requested_count.value);
+  const industry = form.elements.industry.value.trim(), city = form.elements.city.value.trim(), requestedCount = Number(form.elements.requested_count.value), mode = form.elements.targets_only.checked ? 'targets' : 'build';
   if (!industry || !city || !Number.isInteger(requestedCount) || requestedCount < 1 || requestedCount > 100) { $('#form-message').textContent = 'Enter an industry, city or state, and a website count from 1 to 100.'; return; }
   button.disabled = true;
   $('#form-message').textContent = 'Adding your batch…';
   try {
-    const response = await fetch('/api/batches', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ industry, city, requested_count: requestedCount }) });
+    const response = await fetch('/api/batches', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ industry, city, requested_count: requestedCount, mode }) });
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || 'The batch could not be queued.');
-    $('#form-message').textContent = `${requestedCount} completed outreach jobs for ${industry} in ${city} queued. Ask Codex to run it.`;
+    $('#form-message').textContent = mode === 'targets' ? `Find ${requestedCount} ${industry} targets in ${city}: queued. Run it in Claude Code, then press Generate on the ones you want.` : `${requestedCount} websites for ${industry} in ${city} queued. Run it in Claude Code.`;
     form.reset();
     form.elements.requested_count.value = '5';
     previousSignature = '';
   } catch (error) { $('#form-message').textContent = `Couldn't queue this batch: ${error.message}`; }
+  finally { button.disabled = false; }
+});
+$('#target-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget, button = form.querySelector('button');
+  const name = form.elements.name.value.trim(), url = form.elements.url.value.trim(), generate = form.elements.generate.checked;
+  if (!name || !url) { $('#target-message').textContent = 'Enter the business name and its current website.'; return; }
+  button.disabled = true;
+  $('#target-message').textContent = 'Adding…';
+  try {
+    const response = await fetch('/api/jobs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, url, generate }) });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || 'The website could not be added.');
+    $('#target-message').textContent = generate ? `${name} added. The website generator is building it.` : `${name} added to the hand-picked list.`;
+    form.reset(); form.elements.generate.checked = true;
+    previousSignature = '';
+  } catch (error) { $('#target-message').textContent = `Couldn't add this website: ${error.message}`; }
   finally { button.disabled = false; }
 });
 $('#batch-filter').addEventListener('change', event => { batchFilter = event.target.value; render(); });
@@ -146,6 +190,17 @@ $('#jobs').addEventListener('click', event => {
   selectedJob = card.dataset.job; renderDialog(); $('#job-dialog').showModal();
 });
 $('#dialog-content').addEventListener('click', async event => {
+  const generate = event.target.closest('#generate-job');
+  if (generate) {
+    generate.disabled = true;
+    try {
+      const response = await fetch(`/api/jobs/${encodeURIComponent(selectedJob)}/generate`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'The website could not be requested.');
+      previousSignature = '';
+    } catch (error) { generate.disabled = false; generate.textContent = `Couldn't request it: ${error.message}`; }
+    return;
+  }
   const button = event.target.closest('#copy-message');
   if (!button) return;
   const message = $('#manual-message'), status = $('#copy-status');

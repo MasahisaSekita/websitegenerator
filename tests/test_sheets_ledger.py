@@ -86,6 +86,8 @@ class SheetsLedgerTests(unittest.TestCase):
         self.assertEqual(self.requests[-1]['args']['alias'], ['phone:+16175550123', 'email:hi@brightspark.example'])
         self.cli('batch', '--industry', 'Electricians', '--city', 'Delaware, USA', '--count', '20')
         self.assertEqual(self.requests[-1]['args'], {'industry': 'Electricians', 'city': 'Delaware, USA', 'count': 20})
+        self.cli('update', '--job', 'site-1', '--worker', 'w', '--stage', 'delivered')
+        self.assertEqual(self.requests[-1]['args']['stage'], 'delivered')
         self.cli('capacity', '4')
         self.assertEqual(self.requests[-1], {'token': TOKEN, 'command': 'capacity', 'args': {'count': 4}})
 

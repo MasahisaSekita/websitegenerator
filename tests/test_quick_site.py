@@ -1,6 +1,7 @@
 import importlib.util
 import json
 from pathlib import Path
+import re
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -36,5 +37,28 @@ class QuickSiteTests(unittest.TestCase):
     def test_stale_template_requires_preparation(self):
         with patch.object(quick,'fingerprint',return_value='changed'):
             with self.assertRaisesRegex(ValueError,'preparation'):quick.create({'name':'Business','phone':'123456789'})
+
+    def test_single_file_embeds_everything_and_keeps_details_inside_scripts(self):
+        with tempfile.TemporaryDirectory() as folder:
+            result=quick.create({'name':'O\'Brien & Sons </script><!-- x','phone':'+44 20 7946 0958','theme_color':'#0f766e'},folder)
+            file=Path(result['file'])
+            self.assertEqual(file.name,'o-brien-sons-script-x.html')
+            self.assertEqual(file.parent.name,result['id'])
+            page=file.read_text(encoding='utf-8')
+            self.assertEqual(re.findall(r'(?:src|href)="/[^"]*"',page),[])
+            self.assertIn('window.WEBSITE_SINGLE_FILE = true',page)
+            self.assertIn('"/images/hero.jpg": "data:image/jpeg;base64,',page)
+            self.assertNotIn('<link rel="stylesheet"',page)
+            self.assertIn('<style>',page)
+            self.assertEqual(len(re.findall(r'</script>',page)),2)
+            self.assertNotIn('Sons </script>',page)
+            self.assertIn('Sons <\\/script>\\x3C!-- x',page)
+            self.assertIn('#0f766e',page)
+
+    def test_bundle_refuses_a_build_that_cannot_run_from_one_file(self):
+        with tempfile.TemporaryDirectory() as folder:
+            site=Path(quick.create({'name':'Old Build','phone':'123456789'},folder)['site'])
+            for script in (site/'assets').glob('*.js'): script.write_text('console.log(1)\n')
+            with self.assertRaisesRegex(ValueError,'older template build'): quick.bundle(site,Path(folder)/'old.html')
 
 if __name__=='__main__':unittest.main()

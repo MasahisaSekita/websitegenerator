@@ -234,6 +234,28 @@ describe('ledger rules (parity with tests/test_control.py)', () => {
     assert.throws(() => gas.call('batchStatus_', bid, 'complete'));
     gas.call('addJob_', bid, 'Fresh', 'https://fresh.example', []);
   });
+
+  test('a delivered website file counts as a finished website', () => {
+    const gas = ledger();
+    const bid = batch(gas, 'Plumbers', 'Files', 1);
+    const jid = add(gas, bid);
+    gas.call('claimJob_', bid, 'worker');
+    assert.throws(() => update(gas, jid, 'worker', 'delivered', { qa_passed: true, site_file: 'x.html' }), /Invalid stage transition/);
+    for (const stage of ['extracting', 'building', 'checking']) update(gas, jid, 'worker', stage);
+    assert.throws(() => update(gas, jid, 'worker', 'delivered', { qa_passed: true }), /site file/);
+    assert.throws(() => update(gas, jid, 'worker', 'delivered', { site_file: 'runs/quick/a/a.html' }), /site file/);
+    update(gas, jid, 'worker', 'delivered', { qa_passed: true, site_file: 'runs/quick/business-0/business-0.html' }, 'Website file delivered');
+    const snapshot = state(gas);
+    const saved = snapshot.batches.find(item => item.id === bid);
+    assert.deepEqual([saved.completed_count, saved.active_count, saved.remaining_count], [1, 0, 0]);
+    assert.equal(snapshot.workers[0].status, 'idle');
+    assert.equal(snapshot.jobs[0].data.site_file, 'runs/quick/business-0/business-0.html');
+    gas.call('batchStatus_', bid, 'complete');
+    assert.throws(() => update(gas, jid, 'worker', 'skipped'), /no longer active/);
+    assert.throws(() => gas.call('recoverJob_', jid, 'Try again'), /cannot be automatically recovered/);
+    gas.call('cancelBatch_', bid, 'Stop');
+    assert.equal(state(gas).jobs[0].stage, 'delivered');
+  });
 });
 
 describe('Google Sheets storage', () => {
@@ -350,7 +372,7 @@ describe('agent API (doPost)', () => {
     assert.equal(run('update', { job: job.id, worker: 'builder-1', stage: 'deploying' }).error, 'Invalid stage transition');
     assert.deepEqual(run('capacity', { count: 4 }).result, { max_workers: 4 });
     const snapshot = run('state', {}).result;
-    assert.deepEqual(Object.keys(snapshot).sort(), ['batches', 'events', 'jobs', 'revision', 'server_time', 'settings', 'workers']);
+    assert.deepEqual(Object.keys(snapshot).sort(), ['batches', 'events', 'generator', 'jobs', 'revision', 'server_time', 'settings', 'workers']);
     assert.equal(snapshot.settings.max_workers, 4);
     assert.equal(snapshot.batches[0].active_count, 1);
     assert.match(run('nope', {}).error, /Unknown command/);
@@ -393,7 +415,8 @@ describe('dashboard endpoints', () => {
     const gas = ledger();
     const first = gas.as(OWNER, 'getState', null, '');
     const [readsBefore, writesBefore] = [gas.spreadsheet.reads, gas.spreadsheet.writes];
-    assert.deepEqual(plain(gas.as(OWNER, 'getState', first.revision, '')), { unchanged: true, revision: first.revision });
+    const quiet = plain(gas.as(OWNER, 'getState', first.revision, ''));
+    assert.deepEqual([quiet.unchanged, quiet.revision, quiet.generator], [true, first.revision, null]);
     assert.deepEqual([gas.spreadsheet.reads, gas.spreadsheet.writes], [readsBefore, writesBefore]);
     gas.as(OWNER, 'queueBatch', { industry: 'Electricians', city: 'Boston, MA', requested_count: 5 }, '');
     const next = gas.as(OWNER, 'getState', first.revision, '');
@@ -448,8 +471,8 @@ describe('security and setup', () => {
   test('google.script.run can reach only the intended functions', () => {
     const gas = ledger();
     assert.deepEqual(gas.publicFunctions().sort(), [
-      'cancelBatchFromDashboard', 'doGet', 'doPost', 'getJobActivity', 'getState', 'onEdit', 'onOpen',
-      'queueBatch', 'rotateApiToken', 'rotateDashboardKey', 'setManualSent', 'setup', 'showApiToken', 'showDashboardKey',
+      'addTarget', 'cancelBatchFromDashboard', 'doGet', 'doPost', 'getJobActivity', 'getState', 'onEdit', 'onOpen',
+      'queueBatch', 'requestWebsite', 'rotateApiToken', 'rotateDashboardKey', 'setManualSent', 'setup', 'showApiToken', 'showDashboardKey',
     ]);
   });
 
@@ -529,5 +552,95 @@ describe('import from the local SQLite ledger', () => {
     batch(gas);
     assert.throws(() => gas.call('importLedger_', tables(), ''), /empty ledger/);
     assert.throws(() => ledger().call('importLedger_', { jobs: [{ bogus: 1 }] }, ''), /unknown columns/);
+  });
+});
+
+describe('Generate buttons, target lists and the website generator', () => {
+  test('a Generate request is answered by claiming that exact job', () => {
+    const gas = ledger();
+    const bid = batch(gas, 'Electricians', 'Boston', 5);
+    const first = add(gas, bid, 0);
+    const second = add(gas, bid, 1);
+    assert.ok(gas.as(OWNER, 'requestWebsite', second, '').requested_at);
+    assert.equal(plain(gas.as(OWNER, 'requestWebsite', second, '')).already_requested, true);
+    const pending = gas.call('runCommand_', 'requests', { heartbeat: { host: 'office-pc', ready: true, note: 'Ready', running: [], secret: 'dropped' } });
+    assert.deepEqual(plain(pending.requests.map(item => item.id)), [second]);
+    assert.equal(gas.call('runCommand_', 'claim', { job: second, worker: 'generator-1' }).job.id, second);
+    const snapshot = state(gas);
+    const job = snapshot.jobs.find(item => item.id === second);
+    assert.equal(job.stage, 'reviewing');
+    assert.equal(job.data.generate_requested_at, undefined);
+    assert.equal(snapshot.jobs.find(item => item.id === first).stage, 'queued');
+    assert.equal(gas.call('runCommand_', 'requests', {}).requests.length, 0);
+    assert.equal(snapshot.generator.host, 'office-pc');
+    assert.equal(snapshot.generator.secret, undefined);
+    assert.ok(snapshot.generator.seen_at);
+    assert.throws(() => gas.as(OWNER, 'requestWebsite', second, ''), /waiting in the queue/);
+    assert.throws(() => gas.call('runCommand_', 'claim', { job: second, worker: 'generator-2' }), /queued, unassigned/);
+    assert.throws(() => gas.call('runCommand_', 'claim', { job: first, batch: 'batch-other', worker: 'generator-2' }), /another batch/);
+    assert.throws(() => gas.call('runCommand_', 'claim', { worker: 'generator-2' }), /batch or a job/);
+  });
+
+  test('a failed generation returns the job to the queue without retrying it', () => {
+    const gas = ledger();
+    const jid = add(gas, batch(gas));
+    gas.call('requestWebsite_', jid, OWNER);
+    gas.call('claimJob_', null, 'generator-1', jid);
+    gas.call('recoverJob_', jid, 'Website generation stopped: Claude Code is not signed in');
+    const job = state(gas).jobs[0];
+    assert.equal(job.stage, 'queued');
+    assert.equal(job.detail, 'Website generation stopped: Claude Code is not signed in');
+    assert.equal(gas.call('pendingRequests_', null).requests.length, 0);
+    assert.match(state(gas).events[0].message, /^Returned to the queue: Website generation stopped/);
+  });
+
+  test('targets added from the dashboard go to the hand-picked list and can be generated at once', () => {
+    const gas = ledger();
+    const result = gas.as(OWNER, 'addTarget', { name: '  Bright   Spark Electric ', url: 'brightspark.example', generate: true }, '');
+    const snapshot = state(gas);
+    const list = snapshot.batches.find(item => item.id === result.batch_id);
+    assert.deepEqual([list.industry, list.mode, list.status, list.requested_count], ['Hand-picked websites', 'targets', 'running', 100]);
+    const job = snapshot.jobs[0];
+    assert.deepEqual([job.name, job.url, job.data.generate_requested_by], ['Bright Spark Electric', 'https://brightspark.example', OWNER]);
+    assert.equal(gas.as(OWNER, 'addTarget', { name: 'Another', url: 'https://another.example' }, '').batch_id, result.batch_id);
+    assert.throws(() => gas.as(OWNER, 'addTarget', { name: 'Copy', url: 'https://www.brightspark.example/contact' }, ''), /UNIQUE constraint failed/);
+    assert.throws(() => gas.as(OWNER, 'addTarget', { name: ' ', url: 'https://x.example' }, ''), /Business name is required/);
+    assert.throws(() => gas.as('', 'addTarget', { name: 'Anon', url: 'https://anon.example' }, ''), /ACCESS_DENIED/);
+    assert.throws(() => gas.as('', 'requestWebsite', job.id, ''), /ACCESS_DENIED/);
+  });
+
+  test('a targets-only batch keeps its mode and the agent API accepts the new commands', () => {
+    const gas = ledger();
+    const created = gas.as(OWNER, 'queueBatch', { industry: 'Roofers', city: 'Denver, CO', requested_count: 3, mode: 'targets' }, '');
+    assert.equal(created.mode, 'targets');
+    assert.equal(state(gas).batches[0].mode, 'targets');
+    assert.equal(batch(gas, 'Roofers', 'Boulder'), state(gas).batches[1].id);
+    assert.equal(state(gas).batches[1].mode, 'build');
+    assert.throws(() => gas.call('createBatch_', 'Roofers', 'Denver', 3, 'bogus'), /build or targets/);
+    const added = gas.call('runCommand_', 'add-target', { name: 'Peak Roofing', url: 'https://peak.example', batch: created.id, generate: true, by: 'the coordinator' });
+    assert.equal(added.batch_id, created.id);
+    assert.equal(state(gas).jobs[0].data.generate_requested_by, 'the coordinator');
+    assert.equal(plain(gas.call('runCommand_', 'request', { job: added.id })).already_requested, true);
+  });
+
+  test('JetAI and generation results are accepted on delivery', () => {
+    const gas = ledger();
+    const bid = batch(gas);
+    const jid = add(gas, bid);
+    gas.call('claimJob_', bid, 'worker');
+    for (const stage of ['extracting', 'building', 'checking']) update(gas, jid, 'worker', stage);
+    update(gas, jid, 'worker', 'delivered', { qa_passed: true, site_file: 'runs/x/x.html', jetai: { prototype_id: 'abc', status: 'draft' }, generation: { seconds: 90 } });
+    assert.equal(state(gas).jobs[0].data.jetai.prototype_id, 'abc');
+    assert.equal(state(gas).batches[0].completed_count, 1);
+  });
+
+  test('unchanged dashboard polls still carry the generator heartbeat', () => {
+    const gas = ledger();
+    const first = gas.as(OWNER, 'getState', null, '');
+    assert.equal(first.generator, null);
+    gas.call('pendingRequests_', { host: 'laptop', ready: false, note: 'Claude Code is not signed in' });
+    const again = gas.as(OWNER, 'getState', first.revision, '');
+    assert.equal(again.unchanged, true);
+    assert.equal(again.generator.note, 'Claude Code is not signed in');
   });
 });

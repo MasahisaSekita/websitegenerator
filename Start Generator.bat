@@ -1,6 +1,6 @@
 @echo off
-rem Windows equivalent of "Open Dashboard.command" - serves the dashboard on http://localhost:4310
-rem The dashboard includes the website generator, so its Generate buttons work while this window is open.
+rem Starts the website generator: it builds the websites that dashboard Generate buttons ask for.
+rem Leave this window open while you work. Close it or press Ctrl+C to stop.
 setlocal
 cd /d "%~dp0"
 set PYTHONUTF8=1
@@ -15,7 +15,8 @@ if not defined PYEXE (
   pause
   exit /b 1
 )
-echo Dashboard: http://localhost:4310  (close this window or press Ctrl+C to stop)
-start "" /min cmd /c "timeout /t 2 /nobreak >nul & start http://localhost:4310"
-"%PYEXE%" %PYARG% tools\control.py serve --port 4310
+"%PYEXE%" %PYARG% tools\site_runner.py doctor
+echo.
+echo Website generator running. Generate buttons in the dashboard are built here.
+"%PYEXE%" %PYARG% tools\site_runner.py watch
 if errorlevel 1 pause

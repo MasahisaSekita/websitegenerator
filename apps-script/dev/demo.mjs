@@ -44,6 +44,12 @@ export function seedDemo(gas) {
     if (until === 'building') return id;
     update(1, 'checking', null, 'Checking the generated name, phone and email');
     if (until === 'checking') return id;
+    if (until === 'delivered') {
+      const slug = domain.split('.')[0];
+      const jetai = { prototype_id: '6f1c2e9a-4b7d-4c1e-9a3f-' + id.slice(5, 17), name: `${name} · website preview`, slug: `${slug}-${id.slice(-6)}`, status: 'draft' };
+      update(3, 'delivered', { qa_passed: true, site_file: `runs/${id}/${slug}.html`, jetai }, 'Website ready (58 KB) and uploaded to JetAI as a draft prototype');
+      return id;
+    }
     update(2, 'deploying', { qa_passed: true }, 'QA passed; deploying to an isolated Vercel project');
     if (until === 'blocked') {
       update(3, 'blocked', { failure: 'Vercel deployment protection blocked public access' }, options.detail || 'Blocked: the preview asks visitors to log in to Vercel.');
@@ -61,7 +67,7 @@ export function seedDemo(gas) {
     return id;
   }
 
-  gas.call('setCapacity_', 3);
+  gas.call('setCapacity_', 4);
 
   at(29 * 60);
   const cambridge = step(0, 'createBatch_', 'Electricians', 'Cambridge, MA', 3).id;
@@ -85,6 +91,7 @@ export function seedDemo(gas) {
   business(boston, 'South End Sparks', 'southend-sparks.example', 'skipped', { detail: 'Skipped: the business closed; the domain now redirects to a directory.' });
   business(boston, 'Charlestown Circuit', 'charlestown-circuit.example', 'blocked');
   business(boston, 'Jamaica Plain Electric', 'jp-electric.example', 'manual', { detail: 'A visible CAPTCHA protects the only contact form.', email: 'hello@jp-electric.example' });
+  business(boston, 'Roxbury Electric Co.', 'roxbury-electric.example', 'delivered');
   // Three parallel workers: one waiting to send, one stalled at QA, one building right now.
   at(17);
   business(boston, 'Back Bay Lighting & Electric', 'backbay-lighting.example', 'ready');
@@ -93,10 +100,25 @@ export function seedDemo(gas) {
   at(11);
   business(boston, 'Quincy Power Pros', 'quincypower.example', 'building', { worker: 'builder-quincy' });
 
-  at(22);
-  step(0, 'createBatch_', 'Roofers', 'Denver, CO', 10);
+  // A targets-only batch: Claude Code listed qualified businesses; the operator picks which to build.
+  at(70);
+  const denver = step(0, 'createBatch_', 'Roofers', 'Denver, CO', 6, 'targets').id;
+  const target = (minutes, name, domain, reason) => step(minutes, 'addTarget_', { name, url: `https://${domain}/`, batch_id: denver, reason }, 'the coordinator').id;
+  target(4, 'Mile High Roofing', 'milehigh-roofing.example', 'Text-heavy homepage with a tiny phone number and no clear services list');
+  const cherry = target(3, 'Cherry Creek Roof & Gutter', 'cherrycreek-roofing.example', 'Stretched header photo and a menu that overlaps the logo on phones');
+  target(5, 'Front Range Roof Repair', 'frontrange-roofrepair.example', 'Fixed-width layout leaves the page cramped on phones');
+  target(2, 'Sloan Lake Roofing Co.', 'sloanlake-roofing.example', 'Low-contrast grey text and broken gallery images');
+  step(20, 'requestWebsite_', cherry, 'owner@example.com');
+
+  // Hand-picked businesses added with "Add website": one being built by the generator right now.
+  at(9);
+  const harbor = step(0, 'addTarget_', { name: 'Harbor Point Plumbing', url: 'https://harborpoint-plumbing.example/', generate: true }, 'owner@example.com').id;
+  step(1, 'claimJob_', null, 'generator-harborpo', harbor);
+  step(1, 'updateJob_', harbor, 'generator-harborpo', 'extracting', 'Reading the current website', null);
+  step(2, 'updateJob_', harbor, 'generator-harborpo', 'building', 'Writing the website from 3 page(s) of the current site and 4 photo(s)', { workspace: `runs/${harbor}`, source_urls: ['https://harborpoint-plumbing.example/', 'https://harborpoint-plumbing.example/services'] });
 
   gas.context.nowIso_ = realNow;
+  gas.call('pendingRequests_', { host: 'office-pc', ready: true, note: 'Building 1 website(s)', running: [harbor], max_parallel: 2 });
   const jobs = gas.call('runCommand_', 'state', {}).jobs;
   const manual = jobs.find(job => job.name === 'Jamaica Plain Electric');
   clock = Date.now() - 50 * MINUTE;

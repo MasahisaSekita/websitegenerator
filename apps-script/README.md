@@ -2,7 +2,16 @@
 
 The contact-sheet dashboard and the job ledger, running on Google Apps Script with a Google Sheet as the database. Nothing has to run on your computer to see progress: the dashboard is a web app URL you can open anywhere, and the ledger is a spreadsheet you can browse.
 
-The Codex agents still do the real work — discovery, qualification, building, deploying and outreach — with the same tools as before. They write progress to the Sheets ledger through `tools/sheets_ledger.py`, which takes exactly the same commands as `tools/control.py`.
+Claude Code still does the real work. It finds and qualifies businesses with the same tools as before (and, in `vercel` mode, deploys and asks you to approve each outreach message). It writes progress to the Sheets ledger through `tools/sheets_ledger.py`, which takes exactly the same commands as `tools/control.py`.
+
+**Generate buttons** build a website for one business. The dashboard records the request in the sheet. The website generator on your computer (`tools/site_runner.py watch`) picks it up and does the rest:
+
+1. Reads the business's current site with Firecrawl.
+2. Has Claude Code write a new one-page website from the real content.
+3. Checks the page.
+4. Uploads it to JetAI as a draft prototype.
+
+The dashboard shows each step as it happens.
 
 | | Local version | Apps Script version |
 |---|---|---|
@@ -10,7 +19,8 @@ The Codex agents still do the real work — discovery, qualification, building, 
 | Ledger rules | `tools/control.py` | `src/Ledger.gs` — the same stages, deduplication, capacity and single-submission rules |
 | Dashboard | `http://localhost:4310` (`control.py serve`) | The web app URL |
 | Agent commands | `python tools/control.py …` | `python tools/sheets_ledger.py …` (same arguments) |
-| Discovery, builds, deploys, outreach | Codex agents + `tools/` | unchanged |
+| Discovery, builds, deploys, outreach | Claude Code + `tools/` | unchanged |
+| Generate buttons | built into `control.py serve` | `python tools/site_runner.py watch` on your computer |
 
 ## Files
 
@@ -51,10 +61,21 @@ The Codex agents still do the real work — discovery, qualification, building, 
    ```
 
    It only imports into an empty Sheets ledger, and copies batches, jobs, identities, events, workers, submissions and settings.
+8. **Start the website generator** (for Generate buttons), on the computer where Claude Code is installed:
+   1. Put `FIRECRAWL_API_KEY` and `JETAI_API_KEY` in `.env`. Uploads go to `jetai.api_base` in `settings.json`.
+   2. Sign Claude Code in once. `python tools/site_runner.py doctor` prints the exact `claude auth login` command when it isn't signed in. The Claude desktop app's sign-in doesn't carry over to the command-line tool.
+   3. Run `python tools/site_runner.py doctor` again. It should report no problems.
+   4. Start the generator. On Windows, double-click **Start Generator.bat**; anywhere, run:
+
+   ```bash
+   python tools/site_runner.py watch
+   ```
+
+   Leave it running. The dashboard's **Website generator** panel shows whether it is connected, and requests made while it is off wait until it starts.
 
 ### Updating the code later
 
-Saving in the editor does **not** change the live web app. After editing, choose **Deploy → Manage deployments → Edit (pencil) → Version: New version → Deploy**. The URL stays the same.
+Saving in the editor does **not** change the live web app. After editing, choose **Deploy → Manage deployments → Edit (pencil) → Version: New version → Deploy**. The URL stays the same. Update all six `src/` files together. The Generate buttons, the **Add website** dialog and the generator panel need the current `Code.gs`, `Ledger.gs` and dashboard files.
 
 ### Using clasp
 
@@ -79,13 +100,16 @@ python tools/sheets_ledger.py claim --batch BATCH_ID --worker builder-JOB_ID
 
 The dashboard shows:
 
-- **Summary tiles** for outreach sent against the target, work in progress, live previews, manual outreach still to send, and anything that needs attention. Click a tile to filter.
-- **Batches**, each with progress. Click one to scope the whole dashboard to it, copy its run prompt for Codex, or cancel it.
+- **Summary tiles** for finished websites against the target, targets not built yet, work in progress, manual outreach still to send, and anything that needs attention. Click a tile to filter.
+- **Targets**: businesses waiting to be built, each with a **Generate website** button. A requested one shows *Waiting for the generator* until the website generator picks it up. It then moves through Qualify → Build → QA → Delivered. A delivered website shows its file and its JetAI prototype.
+- **Add website**: type a business name and its current website address. It goes on the *Hand-picked websites* list, or on a batch you choose, and with *Generate the website now* ticked it is built right away. The same website, phone or email can't be added twice.
+- **Website generator** panel: whether the generator on your computer is connected, ready, busy or needs setup (for example when Claude Code isn't signed in), with the command that starts it.
+- **Batches**, each with progress. Click one to scope the whole dashboard to it, copy its run prompt for Claude Code, or cancel it.
 - **Workers**, with a warning when one hasn't reported for more than two minutes.
-- **Businesses** as cards or a table, with search, sorting and status filters. Skipped businesses have their own filter, so they no longer crowd *Needs attention*.
+- **Businesses** as cards or a table, with search, sorting and status filters. Skipped businesses have their own filter, so they no longer crowd *Needs attention*. Websites delivered as single HTML files (the current `delivery: file` setting) show as **Delivered**, with the file's location in their details.
 - **Business details**: pipeline progress, qualification evidence, links, and the complete activity history.
 - **Manual outreach**: the verified email and phone, the prepared message with copy buttons, and **Mark as sent** so the to-do list shrinks as you work through it. Marking only updates the ledger; nothing is sent from the dashboard.
-- **New batch**, which hands you a ready-to-paste Codex prompt once the batch is queued. Queued batches still wait for you to ask Codex to run them.
+- **New batch**, which hands you a ready-to-paste Claude Code prompt once the batch is queued. Queued batches wait until you paste that prompt into Claude Code, opened in the project folder. Choose **Only find targets** to have Claude Code list qualified businesses without building them; you then press Generate on the ones you want.
 
 Light and dark themes follow your system, and the toggle in the top bar overrides it.
 
@@ -94,7 +118,7 @@ Light and dark themes follow your system, and the toggle in the top bar override
 - The web app runs as you, and *Anyone* access lets the agents call it without a Google sign-in. Nobody gets data without a secret or an allowed Google account:
   - **Agents** must send `REVAMP_API_TOKEN`. It gives full ledger access, so keep it in `.env` only.
   - **The dashboard** asks for `REVAMP_DASHBOARD_KEY` unless Google identifies the visitor as you or as someone listed in `REVAMP_DASHBOARD_USERS`. To list people, open **Project Settings → Script properties** and enter comma-separated emails, or `@yourcompany.com` for a whole Workspace domain. Google only reveals a visitor's identity to "execute as me" web apps for the owner and for users in the same Workspace domain. Everyone else uses the key.
-- Dashboard viewers can read everything, queue batches, cancel batches (a reason is recorded), and mark manual outreach as sent. They can't change job stages, reserve submissions or send messages.
+- Dashboard viewers can read everything, queue batches, cancel batches (a reason is recorded), add websites, press Generate, and mark manual outreach as sent. Generate only records a request; the generator on your computer does the work, using your own Claude Code, Firecrawl and JetAI accounts. Viewers can't change job stages, reserve submissions or send messages.
 - Replace a secret from the sheet menu: **Replace agent API token…** or **Replace dashboard key…**.
 - The ledger tabs warn before manual edits, because editing cells directly bypasses the safety checks.
 - Setup and the secret-showing menu items refuse to run for web-app visitors.

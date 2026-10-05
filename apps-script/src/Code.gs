@@ -2,11 +2,14 @@
  * Website Generator — Google Apps Script edition.
  *
  *   doGet   serves the dashboard (Index.html + Styles.html + App.html).
- *   doPost  is the JSON API the Codex agents call through tools/sheets_ledger.py.
+ *   doPost  is the JSON API the coordinator (Claude Code) calls through tools/sheets_ledger.py.
  *           It takes the same commands as tools/control.py and needs REVAMP_API_TOKEN.
- *   getState, queueBatch, cancelBatchFromDashboard, setManualSent and getJobActivity
+ *   getState, queueBatch, cancelBatchFromDashboard, setManualSent, getJobActivity,
+ *   requestWebsite and addTarget
  *           are the only functions the dashboard can reach with google.script.run.
  *           Each one checks the viewer first (Google account allowlist or dashboard key).
+ *           A Generate button only records a request; tools/site_runner.py (the website
+ *           generator, on the operator's computer) polls `requests` and builds the website.
  *
  * Deploy as a web app that executes as you, with access "Anyone", so the agents can
  * call the API without a Google sign-in. The token and the dashboard checks keep the
@@ -68,9 +71,12 @@ function runCommand_(command, args) {
   switch (command) {
     case 'ping': return { pong: true, server_time: nowIso_(), revision: ledgerRevision_() };
     case 'state': return writeLedger_(tx => Object.assign(snapshot_(tx), { revision: ledgerRevision_() }));
-    case 'batch': return createBatch_(args.industry, args.city, args.count);
+    case 'batch': return createBatch_(args.industry, args.city, args.count, args.mode);
     case 'add': return addJob_(args.batch, args.name, args.url, args.alias || []);
-    case 'claim': return claimJob_(args.batch, args.worker);
+    case 'add-target': return addTarget_({ name: args.name, url: args.url, batch_id: args.batch, generate: Boolean(args.generate), aliases: args.alias || [], reason: args.reason || '' }, args.by || 'the coordinator');
+    case 'claim': return claimJob_(args.batch || null, args.worker, args.job || null);
+    case 'request': return requestWebsite_(args.job, args.by || 'the coordinator');
+    case 'requests': return pendingRequests_(args.heartbeat);
     case 'update': return updateJob_(args.job, args.worker, args.stage || null, args.detail || '', args.fields);
     case 'alias': return addAlias_(args.job, args.worker, args.identity);
     case 'capacity': return setCapacity_(args.count);
@@ -92,7 +98,8 @@ function runCommand_(command, args) {
 function getState(knownRevision, key) {
   const viewer = authorizeViewer_(key);
   const revision = ledgerRevision_(); // read before the snapshot so a concurrent write triggers a refetch
-  if (knownRevision && String(knownRevision) === revision) return { unchanged: true, revision };
+  // The generator heartbeat changes without a ledger write, so it travels with "unchanged" replies too.
+  if (knownRevision && String(knownRevision) === revision) return { unchanged: true, revision, generator: generatorStatus_(), server_time: nowIso_() };
   return readLedger_(tx => Object.assign(snapshot_(tx), {
     revision,
     viewer: { email: viewer.email, method: viewer.method },
@@ -103,7 +110,19 @@ function getState(knownRevision, key) {
 function queueBatch(input, key) {
   authorizeViewer_(key);
   const values = isPlainObject_(input) ? input : {};
-  return createBatch_(values.industry, values.city, values.requested_count);
+  return createBatch_(values.industry, values.city, values.requested_count, values.mode);
+}
+
+/** The Generate button: asks the website generator to build one queued business. */
+function requestWebsite(jobId, key) {
+  const viewer = authorizeViewer_(key);
+  return requestWebsite_(jobId, viewerLabel_(viewer));
+}
+
+/** Adds a business by its website address, to a batch or the hand-picked list, optionally generating it right away. */
+function addTarget(input, key) {
+  const viewer = authorizeViewer_(key);
+  return addTarget_(input, viewerLabel_(viewer));
 }
 
 function cancelBatchFromDashboard(batchId, reason, key) {
