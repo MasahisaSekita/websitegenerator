@@ -81,6 +81,15 @@ class LedgerTests(unittest.TestCase):
         with self.assertRaises(ValueError): control.add(custom['id'],'Too many','https://too-many.example')
         saved=next(batch for batch in control.snapshot()['batches'] if batch['id']==custom['id'])
         self.assertEqual(saved['requested_count'],12)
+        self.assertEqual(saved['country'],'')  # no country: discovery.country applies
+    def test_batch_country(self):
+        made=control.batch('Bengkel sepeda','Jakarta',5,'targets',' id ')
+        self.assertEqual(made['country'],'ID')
+        saved=next(batch for batch in control.snapshot()['batches'] if batch['id']==made['id'])
+        self.assertEqual((saved['country'],saved['mode']),('ID','targets'))
+        self.assertIn('Bengkel sepeda in Jakarta (ID)',control.snapshot()['events'][0]['message'])
+        for bad in ('Indonesia','I','12'):
+            with self.assertRaises(ValueError): control.batch('Plumbers','Jakarta',5,'build',bad)
     def test_batch_count_validation(self):
         for count in (0,101,2.5,True,'12'):
             with self.assertRaises(ValueError): control.batch('Roofers','Denver',count)

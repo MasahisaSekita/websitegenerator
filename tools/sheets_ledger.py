@@ -118,7 +118,8 @@ def run(a):
     if a.cmd == 'migrate':
         return call('import', {'tables': local_tables(a.db), 'source': str(a.db)}, attempts=1)
     if a.cmd == 'batch':
-        return call('batch', {'industry': a.industry, 'city': a.city, 'count': a.count, **({'mode': a.mode} if a.mode != 'build' else {})})
+        return call('batch', {'industry': a.industry, 'city': a.city, 'count': a.count, **({'mode': a.mode} if a.mode != 'build' else {}),
+                              **({'country': a.country} if a.country else {})})
     if a.cmd == 'add':
         return call('add', {'batch': a.batch, 'name': a.name, 'url': a.url, 'alias': a.alias})
     if a.cmd == 'add-target':
@@ -165,6 +166,7 @@ def parser():
     sub.add_parser('state')
     sub.add_parser('ping', help='Check the URL and token')
     s = sub.add_parser('batch'); s.add_argument('--industry', required=True); s.add_argument('--city', required=True); s.add_argument('--count', type=int, default=5); s.add_argument('--mode', choices=['build', 'targets'], default='build')
+    s.add_argument('--country', default='', help='ISO country code such as US or ID (default: discovery.country in settings.json)')
     s = sub.add_parser('add'); s.add_argument('--batch', required=True); s.add_argument('--name', required=True); s.add_argument('--url', required=True); s.add_argument('--alias', action='append', default=[])
     s = sub.add_parser('add-target'); s.add_argument('--name', required=True); s.add_argument('--url', required=True); s.add_argument('--batch'); s.add_argument('--alias', action='append', default=[]); s.add_argument('--reason', default='', help='Why it qualified, shown in the dashboard'); s.add_argument('--generate', action='store_true'); s.add_argument('--by', default='the coordinator')
     s = sub.add_parser('claim'); s.add_argument('--batch'); s.add_argument('--job'); s.add_argument('--worker', required=True)

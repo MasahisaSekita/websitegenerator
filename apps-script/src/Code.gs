@@ -73,7 +73,7 @@ function runCommand_(command, args) {
   switch (command) {
     case 'ping': return { pong: true, server_time: nowIso_(), revision: ledgerRevision_() };
     case 'state': return writeLedger_(tx => Object.assign(snapshot_(tx), { revision: ledgerRevision_(), runner: runnerInfo_() }));
-    case 'batch': return createBatch_(args.industry, args.city, args.count, args.mode);
+    case 'batch': return createBatch_(args.industry, args.city, args.count, args.mode, args.country);
     case 'add': return addJob_(args.batch, args.name, args.url, args.alias || []);
     case 'add-target': return addTarget_({ name: args.name, url: args.url, batch_id: args.batch, generate: Boolean(args.generate), aliases: args.alias || [], reason: args.reason || '' }, args.by || 'the coordinator');
     case 'claim': return claimJob_(args.batch || null, args.worker, args.job || null);
@@ -119,7 +119,7 @@ function getState(knownRevision, key) {
 function queueBatch(input, key) {
   authorizeViewer_(key);
   const values = isPlainObject_(input) ? input : {};
-  const result = createBatch_(values.industry, values.city, values.requested_count, values.mode);
+  const result = createBatch_(values.industry, values.city, values.requested_count, values.mode, values.country);
   return Object.assign(result, { runner: startRunner_('New batch') });
 }
 

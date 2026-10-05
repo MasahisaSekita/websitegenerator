@@ -216,10 +216,22 @@
   const batchById = id => (data ? data.batches.find(batch => batch.id === id) : null) || null;
   const scopeBatches = () => (data ? (ui.batch === 'all' ? data.batches : data.batches.filter(batch => batch.id === ui.batch)) : []);
   const scopeJobs = () => (data ? (ui.batch === 'all' ? data.jobs : data.jobs.filter(job => job.batch_id === ui.batch)) : []);
-  const batchName = batch => (batch ? `${batch.industry} · ${batch.city}` : '');
+  // ISO 3166-1 codes for the New batch country list; the browser supplies the names.
+  const COUNTRY_CODES = ('AD AE AF AG AI AL AM AO AR AS AT AU AW AX AZ BA BB BD BE BF BG BH BI BJ BL BM BN BO BQ BR BS BT BW BY BZ CA CC CD CF CG CH CI CK CL CM CN CO CR CU CV CW CX CY CZ '
+    + 'DE DJ DK DM DO DZ EC EE EG EH ER ES ET FI FJ FK FM FO FR GA GB GD GE GF GG GH GI GL GM GN GP GQ GR GT GU GW GY HK HN HR HT HU ID IE IL IM IN IO IQ IR IS IT JE JM JO JP KE KG KH KI KM KN KP KR KW KY KZ '
+    + 'LA LB LC LI LK LR LS LT LU LV LY MA MC MD ME MF MG MH MK ML MM MN MO MP MQ MR MS MT MU MV MW MX MY MZ NA NC NE NF NG NI NL NO NP NR NU NZ OM PA PE PF PG PH PK PL PM PR PS PT PW PY QA RE RO RS RU RW '
+    + 'SA SB SC SD SE SG SH SI SJ SK SL SM SN SO SR SS ST SV SX SY SZ TC TD TG TH TJ TK TL TM TN TO TR TT TV TW TZ UA UG US UY UZ VA VC VE VG VI VN VU WF WS XK YE YT ZA ZM ZW').split(' ');
+  const regionNames = (() => { try { return new Intl.DisplayNames(['en'], { type: 'region' }); } catch (error) { return null; } })();
+  const countryName = code => { try { return (code && regionNames && regionNames.of(code)) || code || ''; } catch (error) { return code || ''; } };
+  /** "Jakarta, Indonesia": the batch's place with its country, unless the place already names it. */
+  const placeName = batch => {
+    const name = batch && batch.country ? countryName(batch.country) : '';
+    return name && !String(batch.city).toLowerCase().includes(name.toLowerCase()) ? `${batch.city}, ${name}` : (batch ? batch.city : '');
+  };
+  const batchName = batch => (batch ? `${batch.industry} · ${placeName(batch)}` : '');
   const runPrompt = batch => (batchMode(batch) === 'targets'
-    ? `/local-business-revamp Find targets for the queued dashboard batch ${batch.id}: ${batch.requested_count} qualified ${batch.industry} businesses in ${batch.city}. Register them without building websites; I'll press Generate in the dashboard.`
-    : `/local-business-revamp Run the queued dashboard batch ${batch.id}: ${batch.requested_count} completed websites for ${batch.industry} in ${batch.city}.`);
+    ? `/local-business-revamp Find targets for the queued dashboard batch ${batch.id}: ${batch.requested_count} qualified ${batch.industry} businesses in ${placeName(batch)}. Register them without building websites; I'll press Generate in the dashboard.`
+    : `/local-business-revamp Run the queued dashboard batch ${batch.id}: ${batch.requested_count} completed websites for ${batch.industry} in ${placeName(batch)}.`);
 
   const cloudRunner = () => Boolean(data && data.runner && data.runner.mode === 'github');
 
@@ -961,9 +973,22 @@
       : 'From 1 to 100. Only finished websites count — skipped businesses are replaced.';
   }
 
+  /** The country list, sorted by name; preselects the last country used here, else the newest batch's, else the US. */
+  function fillCountries() {
+    const select = batchForm.elements.country;
+    if (!select.options.length) {
+      select.innerHTML = COUNTRY_CODES.map(code => [code, countryName(code)]).sort((a, b) => a[1].localeCompare(b[1]))
+        .map(([code, name]) => `<option value="${esc(code)}">${esc(name)}</option>`).join('');
+    }
+    const newest = (data ? data.batches : []).filter(batch => batch.country).slice(-1)[0];
+    const wanted = [storage.get('wg.country'), newest && newest.country, 'US'].find(code => code && COUNTRY_CODES.includes(code));
+    select.value = wanted;
+  }
+
   function openBatchDialog() {
     batchForm.reset();
     batchForm.elements.requested_count.value = '5';
+    fillCountries();
     syncMode();
     $$('[aria-invalid]', batchForm).forEach(field => field.removeAttribute('aria-invalid'));
     $('#batch-error').textContent = '';
@@ -1004,13 +1029,14 @@
     const city = batchForm.elements.city.value.trim();
     const count = Number(batchForm.elements.requested_count.value);
     const mode = batchForm.elements.mode.value === 'targets' ? 'targets' : 'build';
+    const country = COUNTRY_CODES.includes(batchForm.elements.country.value) ? batchForm.elements.country.value : 'US';
     const problems = [];
     batchForm.elements.industry.setAttribute('aria-invalid', String(!industry));
     batchForm.elements.city.setAttribute('aria-invalid', String(!city));
     const countValid = Number.isInteger(count) && count >= 1 && count <= 100;
     batchForm.elements.requested_count.setAttribute('aria-invalid', String(!countValid));
     if (!industry) problems.push('an industry');
-    if (!city) problems.push('a city or state');
+    if (!city) problems.push('a city or region');
     if (!countValid) problems.push('a website count from 1 to 100');
     if (problems.length) {
       $('#batch-error').textContent = `Add ${problems.join(', ').replace(/, ([^,]*)$/, ' and $1')}.`;
@@ -1021,9 +1047,10 @@
     submit.disabled = true;
     submit.textContent = 'Queuing…';
     $('#batch-error').textContent = '';
-    server('queueBatch', { industry, city, requested_count: count, mode }, accessKey).then(result => {
-      const batch = { id: result.id, industry, city, requested_count: result.requested_count, mode: result.mode || mode };
-      $('#batch-done-summary').textContent = `${industry} · ${city} · ${batchMode(batch) === 'targets' ? plural(result.requested_count, 'target') + ' to find' : plural(result.requested_count, 'website')}`;
+    storage.set('wg.country', country);
+    server('queueBatch', { industry, city, requested_count: count, mode, country }, accessKey).then(result => {
+      const batch = { id: result.id, industry, city, requested_count: result.requested_count, mode: result.mode || mode, country: result.country || country };
+      $('#batch-done-summary').textContent = `${batchName(batch)} · ${batchMode(batch) === 'targets' ? plural(result.requested_count, 'target') + ' to find' : plural(result.requested_count, 'website')}`;
       $('#batch-prompt').textContent = runPrompt(batch);
       const onGitHub = Boolean(result.runner) || cloudRunner();
       $('#batch-next').hidden = onGitHub;

@@ -33,6 +33,7 @@ from types import SimpleNamespace
 from urllib.parse import urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import countries  # noqa: E402
 import html_site  # noqa: E402
 import jetai  # noqa: E402
 import site_assets  # noqa: E402
@@ -366,8 +367,11 @@ def prepare(ledger, job, worker, evidence=None, pages=None):
     hand_picked = batch.get('industry') == 'Hand-picked websites'
     city = '' if hand_picked else batch.get('city', '')
     industry = '' if hand_picked else batch.get('industry', '')
+    # The batch's country; hand-picked websites and older batches go by the domain ending (.co.id), else the default.
+    discovery = settings().get('discovery') if isinstance(settings().get('discovery'), dict) else {}
+    country = countries.resolve(batch.get('country') or '', job['url'], discovery.get('country') or 'US')
     try:
-        brief = html_site.write_brief(job_dir, evidence_dirs, job['name'], job['url'], city, industry)
+        brief = html_site.write_brief(job_dir, evidence_dirs, job['name'], job['url'], city, industry, country=country)
     except (ValueError, OSError) as error:
         raise BuildError(f'Could not prepare the brief: {error}') from None
     fields = {'workspace': rel(job_dir)}

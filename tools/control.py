@@ -129,27 +129,33 @@ def snapshot():
         for b in out['batches']:
             b.update(batch_progress(c, b['id']))
             b['mode'] = config.get('batch_mode:' + b['id'], 'build')
+            b['country'] = config.get('batch_country:' + b['id'], '')
         out['settings'] = {'batch_size': 5, 'max_workers': int(config.get('max_workers', 3))}
         out['generator'] = generator_status(config)
         out['server_time'] = now()
         return out
 
-def batch(industry, city, requested_count=5, mode='build'):
+def batch(industry, city, requested_count=5, mode='build', country=''):
     if not isinstance(industry, str) or not isinstance(city, str) or not industry.strip() or not city.strip():
         raise ValueError('Industry and city are required')
     if len(industry)>150 or len(city)>150: raise ValueError('Use an industry and city under 150 characters')
     if isinstance(requested_count, bool) or not isinstance(requested_count, int) or not 1 <= requested_count <= 100:
         raise ValueError('Website count must be a whole number from 1 to 100')
     if mode not in BATCH_MODES: raise ValueError('Batch mode must be build or targets')
+    country = country.strip().upper() if isinstance(country, str) else ''
+    if country and not re.fullmatch(r'[A-Z]{2}', country): raise ValueError('Country must be a two-letter code such as US or ID')
+    place = city.strip() + (f' ({country})' if country else '')
     with connect() as c:
         bid = ident('batch')
         c.execute('INSERT INTO batches(id,industry,city,status,created_at,requested_count) VALUES (?,?,?,?,?,?)', (bid, industry.strip(), city.strip(), 'queued', now(), requested_count))
+        if country:
+            c.execute('INSERT OR REPLACE INTO config VALUES (?,?)', ('batch_country:' + bid, country))
         if mode == 'targets':
             c.execute('INSERT OR REPLACE INTO config VALUES (?,?)', ('batch_mode:' + bid, mode))
-            event(c, None, f'Batch queued: find {requested_count} target websites for {industry.strip()} in {city.strip()}. Waiting for the coordinator; press Generate on the targets you want built.')
+            event(c, None, f'Batch queued: find {requested_count} target websites for {industry.strip()} in {place}. Waiting for the coordinator; press Generate on the targets you want built.')
         else:
-            event(c, None, f'Batch queued: {requested_count} websites for {industry.strip()} in {city.strip()}. Waiting for the coordinator.')
-        return {'id': bid, 'status': 'queued', 'requested_count': requested_count, 'mode': mode}
+            event(c, None, f'Batch queued: {requested_count} websites for {industry.strip()} in {place}. Waiting for the coordinator.')
+        return {'id': bid, 'status': 'queued', 'requested_count': requested_count, 'mode': mode, 'country': country}
 
 def hand_picked_batch():
     """The standing list for businesses added from a dashboard rather than found by the coordinator."""
@@ -462,7 +468,7 @@ def serve(port, generator=True):
                     result=create_quick_site(data)
                     result['preview_url']='/preview/'+result['id']+'/'
                     self.send(201,result)
-                else: self.send(201,batch(data.get('industry'),data.get('city'),data.get('requested_count',5),data.get('mode') or 'build'))
+                else: self.send(201,batch(data.get('industry'),data.get('city'),data.get('requested_count',5),data.get('mode') or 'build',data.get('country') or ''))
             except (ValueError,AttributeError,sqlite3.IntegrityError) as e:
                 message=str(e)
                 if isinstance(e,sqlite3.IntegrityError): message='That business is already in the ledger (same website, phone or email).'
@@ -479,7 +485,7 @@ def main():
     p=argparse.ArgumentParser(description=__doc__); sub=p.add_subparsers(dest='cmd',required=True)
     sub.add_parser('state')
     s=sub.add_parser('serve'); s.add_argument('--port',type=int,default=4310); s.add_argument('--no-generator',action='store_true',help='Do not run the website generator for Generate buttons in this process')
-    s=sub.add_parser('batch'); s.add_argument('--industry',required=True); s.add_argument('--city',required=True); s.add_argument('--count',type=int,default=5); s.add_argument('--mode',choices=BATCH_MODES,default='build')
+    s=sub.add_parser('batch'); s.add_argument('--industry',required=True); s.add_argument('--city',required=True); s.add_argument('--count',type=int,default=5); s.add_argument('--mode',choices=BATCH_MODES,default='build'); s.add_argument('--country',default='',help='ISO country code such as US or ID (default: discovery.country in settings.json)')
     s=sub.add_parser('add'); s.add_argument('--batch',required=True); s.add_argument('--name',required=True); s.add_argument('--url',required=True); s.add_argument('--alias',action='append',default=[])
     s=sub.add_parser('add-target'); s.add_argument('--name',required=True); s.add_argument('--url',required=True); s.add_argument('--batch'); s.add_argument('--alias',action='append',default=[]); s.add_argument('--reason',default='',help='Why it qualified, shown in the dashboard'); s.add_argument('--generate',action='store_true'); s.add_argument('--by',default='the coordinator')
     s=sub.add_parser('claim'); s.add_argument('--batch'); s.add_argument('--job'); s.add_argument('--worker',required=True)
@@ -501,7 +507,7 @@ def main():
     try:
         if a.cmd=='serve': return serve(a.port,not a.no_generator)
         if a.cmd=='state': result=snapshot()
-        elif a.cmd=='batch': result=batch(a.industry,a.city,a.count,a.mode)
+        elif a.cmd=='batch': result=batch(a.industry,a.city,a.count,a.mode,a.country)
         elif a.cmd=='add': result=add(a.batch,a.name,a.url,a.alias)
         elif a.cmd=='add-target': result=add_target(a.name,a.url,a.batch,a.generate,a.by,a.reason,a.alias)
         elif a.cmd=='claim': result=claim(a.batch,a.worker,a.job)

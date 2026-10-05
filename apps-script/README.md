@@ -129,7 +129,9 @@ The dashboard shows:
 - **Website generator** panel: where websites are built and what is happening there.
   - **On GitHub:** *On GitHub* while it waits for work, *Working on GitHub* or *Building 2 websites* while a job runs, or *Can't start on GitHub* with the reason (for example, a wrong token). It links to the runs on GitHub.
   - **On a computer:** whether the generator on your computer is connected, ready, busy or needs setup, with the command that starts it.
-- **New batch**: an industry, a city and how many websites.
+- **New batch**: an industry, a city or region, its country and how many websites.
+  - The country decides where and in which language the search runs, and how phone numbers are read.
+  - For countries whose language isn't built in (see below), type the industry in the local language.
   - On the GitHub runner it starts on GitHub straight away.
   - Otherwise it gives you a prompt to paste into Claude Code, opened in the project folder. The batch waits until you do.
   - Choose **Only find targets** to list qualified businesses without building them; you then press Generate on the ones you want.
@@ -203,6 +205,11 @@ To go back to a computer, choose **Website Generator → Run on a computer inste
 **How target finding differs on GitHub.**
 
 - **Search:** there is no browser, so it searches with Firecrawl and keeps only results 91–100, Google's page 10, for up to six variants of the query.
+- **Countries:** the search runs in the batch's country, with phrases in its main language.
+  - Built in: English, Indonesian, Malay, Spanish, Portuguese, French, German, Italian and Dutch.
+  - Other countries use the industry and place as typed. You can add phrases for any language under `discovery.queries` in `settings.json`.
+  - Phone numbers get the country's calling code, and directories and marketplaces such as shopee.co.id or yelp.co.uk are skipped.
+  - Batches queued before countries existed count as `discovery.country` (US).
 - **Screening:** it skips directories, social sites and businesses already in the ledger, and screens each remaining homepage with a Firecrawl screenshot.
 - **Judging:** Claude decides from that screenshot whether the site looks weak, following `references/qualify-prompt.md`.
 - **Limits:** it doesn't check sites on a phone, and it doesn't work through every city of a state, so queue one batch per city.

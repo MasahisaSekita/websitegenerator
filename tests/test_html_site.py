@@ -115,6 +115,29 @@ class HtmlSiteTests(unittest.TestCase):
         self.assertIn('evidence/screenshots/home.png', text.replace('\\', '/'))
         self.assertIn('**Bright Spark Electric**', text)
 
+    def test_other_countries_numbers_addresses_and_hours(self):
+        pages = [{'url': 'https://bengkelmaju.co.id/', 'screenshot': None, 'evidence': self.evidence, 'data': {
+            'html': '<a href="https://wa.me/6281234567890">WhatsApp</a>',
+            'markdown': 'Bengkel Maju\n\nAlamat: Jl. Kemang Raya No. 12, Jakarta Selatan 12730\n\nTelepon (021) 7190 1234\n\n'
+                        'Senin - Jumat 08.00 - 17.00\n\nHauptstraße 5, 10115 Berlin\n\nCalle Mayor 5, Madrid'}}]
+        facts = html_site.extract(pages, 'https://bengkelmaju.co.id/', 'ID')
+        self.assertEqual([p['display'] for p in facts['phones']], ['(021) 7190 1234'])
+        addresses = [a['text'] for a in facts['addresses']]
+        for expected in ('Alamat: Jl. Kemang Raya No. 12, Jakarta Selatan 12730', 'Hauptstraße 5, 10115 Berlin', 'Calle Mayor 5, Madrid'):
+            self.assertIn(expected, addresses)
+        self.assertEqual([h['text'] for h in facts['hours']], ['Senin - Jumat 08.00 - 17.00'])
+        self.assertEqual(html_site.extract(pages, 'https://bengkelmaju.co.id/')['phones'][0]['display'], '(021) 7190 1234')
+        # The page writer gets the tap-to-call form, and the checker accepts it for the number as written.
+        with patch.object(html_site.site_assets, 'fetch', side_effect=fake_fetch):
+            brief = html_site.write_brief(self.job, [self.evidence], 'Bright Spark Electric', 'https://brightspark.example/', country='ID')
+        self.assertEqual(brief['country'], 'ID')
+        self.assertIn('- Country (ISO code): ID; its phone numbers start with +62', (self.job / 'brief.md').read_text(encoding='utf-8'))
+        page = self.job / 'site' / 'index.html'
+        page.write_text(GOOD_PAGE.replace('tel:+16175550142', 'tel:+622171901234'), encoding='utf-8')
+        joined = '\n'.join(html_site.check(page, 'Bright Spark Electric', '(021) 7190 1234')['errors'])
+        self.assertNotIn('tap-to-call', joined)
+        self.assertIn('tap-to-call', '\n'.join(html_site.check(page, 'Bright Spark Electric', '(021) 7190 9999')['errors']))
+
     def test_pick_pages_prefers_services_about_contact_on_the_same_site(self):
         links = ['https://brightspark.example/blog/2019/05/post', 'https://brightspark.example/contact', 'https://brightspark.example/about-us/',
                  'https://other-site.example/services', 'https://brightspark.example/services', 'https://brightspark.example/logo.png']

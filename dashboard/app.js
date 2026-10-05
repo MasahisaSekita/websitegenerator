@@ -8,6 +8,14 @@ const time = (value) => { const date = new Date(value); return Number.isNaN(date
 function safeURL(value) { try { const url = new URL(value); return ['http:', 'https:'].includes(url.protocol) ? url.href : null; } catch { return null; } }
 function isManual(job) { return job.stage === 'manual' || job.contact_status === 'manual_required' || job.data?.outreach_mode === 'manual'; }
 const requestedAt = (job) => job.data?.generate_requested_at || '';
+// ISO 3166-1 codes for the batch country list; the browser supplies the names.
+const COUNTRY_CODES = ('AD AE AF AG AI AL AM AO AR AS AT AU AW AX AZ BA BB BD BE BF BG BH BI BJ BL BM BN BO BQ BR BS BT BW BY BZ CA CC CD CF CG CH CI CK CL CM CN CO CR CU CV CW CX CY CZ '
+  + 'DE DJ DK DM DO DZ EC EE EG EH ER ES ET FI FJ FK FM FO FR GA GB GD GE GF GG GH GI GL GM GN GP GQ GR GT GU GW GY HK HN HR HT HU ID IE IL IM IN IO IQ IR IS IT JE JM JO JP KE KG KH KI KM KN KP KR KW KY KZ '
+  + 'LA LB LC LI LK LR LS LT LU LV LY MA MC MD ME MF MG MH MK ML MM MN MO MP MQ MR MS MT MU MV MW MX MY MZ NA NC NE NF NG NI NL NO NP NR NU NZ OM PA PE PF PG PH PK PL PM PR PS PT PW PY QA RE RO RS RU RW '
+  + 'SA SB SC SD SE SG SH SI SJ SK SL SM SN SO SR SS ST SV SX SY SZ TC TD TG TH TJ TK TL TM TN TO TR TT TV TW TZ UA UG US UY UZ VA VC VE VG VI VN VU WF WS XK YE YT ZA ZM ZW').split(' ');
+const regionNames = (() => { try { return new Intl.DisplayNames(['en'], { type: 'region' }); } catch { return null; } })();
+const countryName = (code) => { try { return (code && regionNames && regionNames.of(code)) || code || ''; } catch { return code || ''; } };
+const placeName = (batch) => { const name = batch.country ? countryName(batch.country) : ''; return name && !String(batch.city).toLowerCase().includes(name.toLowerCase()) ? `${batch.city}, ${name}` : batch.city; };
 function stageLabel(job) {
   if (job.stage === 'queued' && !isManual(job)) return requestedAt(job) ? 'Requested' : 'Target';
   return isManual(job) ? (job.stage === 'manual' ? 'Manual outreach' : job.stage === 'queued' ? 'Manual · build queued' : `Manual · ${label(job.stage)}`) : label(job.stage);
@@ -47,7 +55,7 @@ function render() {
   const batches = state.batches;
   if (batchFilter !== 'all' && !batches.some(batch => String(batch.id) === batchFilter)) batchFilter = 'all';
   const select = $('#batch-filter');
-  select.innerHTML = '<option value="all">All batches</option>' + batches.map(batch => `<option value="${escapeHTML(batch.id)}">${escapeHTML(batch.industry)} · ${escapeHTML(batch.city)} · ${escapeHTML(batch.completed_count || 0)}/${escapeHTML(batch.requested_count || 5)} completed</option>`).join('');
+  select.innerHTML = '<option value="all">All batches</option>' + batches.map(batch => `<option value="${escapeHTML(batch.id)}">${escapeHTML(batch.industry)} · ${escapeHTML(placeName(batch))} · ${escapeHTML(batch.completed_count || 0)}/${escapeHTML(batch.requested_count || 5)} completed</option>`).join('');
   select.value = batchFilter;
   const allJobs = state.jobs.filter(job => batchFilter === 'all' || String(job.batch_id) === batchFilter);
   const jobs = allJobs.filter(job => stageFilter === 'all' || category(job) === stageFilter);
@@ -141,19 +149,29 @@ async function poll() {
     $('#connection span').textContent = previousSignature ? 'Reconnecting' : 'Offline';
   } finally { setTimeout(poll, document.hidden ? 8000 : 2000); }
 }
+(function fillCountries() {
+  const select = $('#batch-form').elements.country;
+  select.innerHTML = COUNTRY_CODES.map(code => [code, countryName(code)]).sort((a, b) => a[1].localeCompare(b[1])).map(([code, name]) => `<option value="${escapeHTML(code)}">${escapeHTML(name)}</option>`).join('');
+  let saved = null;
+  try { saved = localStorage.getItem('wg.country'); } catch { /* private mode */ }
+  select.value = COUNTRY_CODES.includes(saved) ? saved : 'US';
+})();
 $('#batch-form').addEventListener('submit', async (event) => {
   event.preventDefault();
   const form = event.currentTarget, button = form.querySelector('button');
-  const industry = form.elements.industry.value.trim(), city = form.elements.city.value.trim(), requestedCount = Number(form.elements.requested_count.value), mode = form.elements.targets_only.checked ? 'targets' : 'build';
-  if (!industry || !city || !Number.isInteger(requestedCount) || requestedCount < 1 || requestedCount > 100) { $('#form-message').textContent = 'Enter an industry, city or state, and a website count from 1 to 100.'; return; }
+  const industry = form.elements.industry.value.trim(), city = form.elements.city.value.trim(), requestedCount = Number(form.elements.requested_count.value), mode = form.elements.targets_only.checked ? 'targets' : 'build', country = form.elements.country.value || 'US';
+  if (!industry || !city || !Number.isInteger(requestedCount) || requestedCount < 1 || requestedCount > 100) { $('#form-message').textContent = 'Enter an industry, a city or region, and a website count from 1 to 100.'; return; }
   button.disabled = true;
   $('#form-message').textContent = 'Adding your batch…';
   try {
-    const response = await fetch('/api/batches', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ industry, city, requested_count: requestedCount, mode }) });
+    const response = await fetch('/api/batches', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ industry, city, requested_count: requestedCount, mode, country }) });
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || 'The batch could not be queued.');
-    $('#form-message').textContent = mode === 'targets' ? `Find ${requestedCount} ${industry} targets in ${city}: queued. Run it in Claude Code, then press Generate on the ones you want.` : `${requestedCount} websites for ${industry} in ${city} queued. Run it in Claude Code.`;
+    const place = placeName({ city, country });
+    $('#form-message').textContent = mode === 'targets' ? `Find ${requestedCount} ${industry} targets in ${place}: queued. Run it in Claude Code, then press Generate on the ones you want.` : `${requestedCount} websites for ${industry} in ${place} queued. Run it in Claude Code.`;
+    try { localStorage.setItem('wg.country', country); } catch { /* private mode */ }
     form.reset();
+    form.elements.country.value = country;
     form.elements.requested_count.value = '5';
     previousSignature = '';
   } catch (error) { $('#form-message').textContent = `Couldn't queue this batch: ${error.message}`; }

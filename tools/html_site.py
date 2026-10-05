@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Single-file HTML websites built from a business's scraped website. Standard library only.
 
-  brief  --job-dir runs/JOB_ID --evidence DIR [--evidence DIR] --name NAME --url URL [--city C] [--industry I]
+  brief  --job-dir runs/JOB_ID --evidence DIR [--evidence DIR] --name NAME --url URL [--city C] [--industry I] [--country CC]
          Reads cached Firecrawl pages, downloads the business's own photos into JOB_DIR/site/assets/
          and writes JOB_DIR/brief.md (for the AI writing the page) plus JOB_DIR/brief.json.
   check  --file JOB_DIR/site/index.html [--name N] [--phone P] [--email E] [--image-host H]
@@ -25,6 +25,7 @@ import sys
 from urllib.parse import urljoin, urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import countries  # noqa: E402  (calling codes for international phone links)
 import site_assets  # noqa: E402  (SSRF-safe fetch and raster type detection)
 
 MAX_FINAL_CHARS = 4_800_000        # JetAI prototypes accept 5,000,000 characters
@@ -53,9 +54,18 @@ PAGE_PRIORITY = [
 ]
 PLACEHOLDER = re.compile(r'lorem ipsum|\bTODO\b|\bTBD\b|\bFIXME\b|\{\{|\}\}|\[(?:your|insert|add|business|company)\b|placeholder text|your (?:business|company) name', re.I)
 JUNK_IMAGE = re.compile(r'sprite|spacer|pixel|blank\.|transparent|loader|loading|spinner|facebook\.com/tr|google-analytics|doubleclick|/ads?/|badge|widget|captcha|gravatar|emoji', re.I)
-DAY = re.compile(r'\b(mon|tue|wed|thu|fri|sat|sun)[a-z]*\b', re.I)
-TIME = re.compile(r'\b\d{1,2}(?::\d{2})?\s*(?:am|pm|a\.m\.|p\.m\.)|\b\d{1,2}:\d{2}\b|24\s*/\s*7|24 hours', re.I)
+# Day names in English, Indonesian/Malay, Spanish, Portuguese, French, German, Italian and Dutch.
+DAY = re.compile(r'\b(?:(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*|senin|selasa|rabu|kamis|jum\'?at|sabtu|minggu|isnin|khamis|ahad'
+                 r'|lunes|martes|miércoles|miercoles|jueves|viernes|sábado|domingo|segunda|terça|terca|quarta|quinta|sexta'
+                 r'|lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche|montag|dienstag|mittwoch|donnerstag|freitag|samstag|sonntag'
+                 r'|lunedì|martedì|mercoledì|giovedì|venerdì|sabato|domenica|maandag|dinsdag|woensdag|donderdag|vrijdag|zaterdag|zondag)\b', re.I)
+TIME = re.compile(r'\b\d{1,2}(?::\d{2})?\s*(?:am|pm|a\.m\.|p\.m\.)|\b\d{1,2}[:.]\d{2}\b|\b\d{1,2}h\d{0,2}\b|24\s*/\s*7|24 hours|24 jam', re.I)
 ADDRESS = re.compile(r'\b\d{1,6}\s+(?:[A-Z0-9][\w.\'-]*\s+){0,5}(?:St|Street|Ave|Avenue|Rd|Road|Blvd|Boulevard|Dr|Drive|Ln|Lane|Way|Ct|Court|Pl|Place|Pkwy|Parkway|Hwy|Highway|Sq|Square|Ter|Terrace|Cir|Circle|Trl|Trail)\b\.?[^\n]{0,70}', re.I)
+# Addresses written the other way round: Jl. Sudirman No. 5, Calle Mayor 5, Hauptstraße 5, 10 rue de Rivoli, or "Alamat: …".
+ADDRESS_INTL = re.compile(r'\b(?:Jl\.?|Jln\.?|Jalan|Gg\.?|Calle|Avenida|Avda\.?|Rua|Travessa|Rodovia|Estrada|Via|Viale|Piazza|Corso|Plaza|Paseo|Carrera|Calzada|Praça|Largo)\s+[^\n]{2,80}?\d[^\n]{0,60}'
+                          r'|\b[\wÄÖÜäöüß-]+(?:straße|strasse|str\.|weg|platz|allee|gasse|straat|laan|plein|gracht|kade|singel)\s+\d+[a-z]?\b[^\n]{0,60}'
+                          r'|\b\d{1,5}(?:\s?(?:bis|ter))?,?\s+(?i:rue|avenue|boulevard|bd|chemin|allée|impasse|quai|route)\b[^\n]{2,80}')
+ADDRESS_LABEL = re.compile(r'^#*\s*(?:address|alamat|adresse|dirección|direccion|indirizzo|endereço|endereco|adres|anschrift)\s*[:：]\s*\S.{4,140}$', re.I)
 EMAIL = re.compile(r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}')
 PHONE = re.compile(r'(?<![\w/=])(?:\+\d{1,3}[\s.-]?)?\(?\d{2,4}\)?[\s.-]?\d{3,4}[\s.-]?\d{3,4}(?![\w/])')
 CITY_LINE = re.compile(r"^[A-Za-z][A-Za-z .'-]{1,40},\s*[A-Za-z .]{2,30}\s+[A-Z0-9]{3,6}(?:[- ]?[A-Z0-9]{3,4})?$|^[A-Za-z][A-Za-z .'-]{1,40},\s*[A-Z]{2}\b")
@@ -236,11 +246,13 @@ def clean_markdown(text):
     return re.sub(r'\n{3,}', '\n\n', '\n'.join(out)).strip()
 
 
-def extract(pages, site_url):
+def extract(pages, site_url, country=''):
     home = registered(urlsplit(site_url).hostname)
     facts = {'phones': {}, 'emails': {}, 'addresses': [], 'hours': [], 'social': {}, 'booking': [],
              'internal': {}, 'jsonld': [], 'images': [], 'colors': [], 'titles': [], 'descriptions': []}
     css, meta_color = [], ''
+    # Numbers in running text: North American ones have ten digits; elsewhere eight is common (Singapore, Spain…).
+    text_digits = 10 if countries.CALLING.get((country or '').upper(), '1') == '1' else 8
     seen_images = set()
     for page in pages:
         data = page['data']
@@ -300,7 +312,7 @@ def extract(pages, site_url):
         markdown = data.get('markdown') if isinstance(data.get('markdown'), str) else ''
         plain = clean_markdown(markdown)
         for match in PHONE.finditer(plain):
-            if plausible_phone(match.group(0)) and len(phone_digits(match.group(0))) >= 10:
+            if plausible_phone(match.group(0)) and len(phone_digits(match.group(0))) >= text_digits:
                 entry = facts['phones'].setdefault(phone_digits(match.group(0)), {'display': match.group(0).strip(), 'href': '', 'sources': set()})
                 entry['sources'].add('text on ' + page['url'])
         for match in EMAIL.finditer(plain):
@@ -309,7 +321,7 @@ def extract(pages, site_url):
                 facts['emails'].setdefault(address, set()).add('text on ' + page['url'])
         lines = [' '.join(line.split()).strip('-* ') for line in plain.splitlines()]
         for index, stripped in enumerate(lines):
-            if ADDRESS.search(stripped) and len(stripped) < 160:
+            if (ADDRESS.search(stripped) or ADDRESS_INTL.search(stripped) or ADDRESS_LABEL.search(stripped)) and len(stripped) < 160:
                 following = next((line for line in lines[index + 1:index + 4] if line), '')
                 if CITY_LINE.search(following) and not CITY_LINE.search(stripped.split(',', 1)[-1].strip()):
                     stripped = f'{stripped}, {following}'  # "120 Main Street" then "Worcester, MA 01602"
@@ -473,10 +485,13 @@ def download_images(candidates, assets_dir, limit=MAX_DOWNLOADS):
 # ---------------------------------------------------------------------------
 # Brief
 
-def write_brief(job_dir, evidence_dirs, name, url, city='', industry='', images=True):
+def write_brief(job_dir, evidence_dirs, name, url, city='', industry='', images=True, country=''):
     job_dir = Path(job_dir).resolve()
     pages = load_pages(evidence_dirs)
-    facts = extract(pages, url)
+    country = (country or '').upper()
+    facts = extract(pages, url, country)
+    for phone in facts['phones']:
+        phone['international'] = countries.e164(phone['href'] or phone['display'], country)
     site_dir = job_dir / 'site'
     site_dir.mkdir(parents=True, exist_ok=True)
     photos = download_images(facts['images'], site_dir / 'assets') if images and facts['images'] else []
@@ -496,13 +511,18 @@ def write_brief(job_dir, evidence_dirs, name, url, city='', industry='', images=
         lines.append(f'- Industry: {industry}')
     if city:
         lines.append(f'- Location searched: {city}')
+    if country in countries.CALLING:
+        lines.append(f'- Country (ISO code): {country}; its phone numbers start with +{countries.CALLING[country]}')
     lines.append('- Screenshots of the current website (open them: they show the brand colors and what to improve): '
                  + (', '.join(f'`{rel(s)}`' for s in screenshots) or 'none saved'))
     lines += ['', '## Contact details found on the current website', '']
     if facts['phones']:
         for phone in facts['phones'][:4]:
-            href = f" (tel: link `{phone['href']}`)" if phone['href'] else ''
-            lines.append(f"- Phone: {phone['display']}{href} — {'; '.join(phone['sources'][:3])}")
+            notes = [f"tel: link `{phone['href']}`"] if phone['href'] else []
+            if phone['international'] and phone_digits(phone['international']) != phone_digits(phone['href']):
+                notes.append(f"for the tap-to-call link use `tel:{phone['international']}`")
+            extra = f" ({'; '.join(notes)})" if notes else ''
+            lines.append(f"- Phone: {phone['display']}{extra} — {'; '.join(phone['sources'][:3])}")
     else:
         lines.append('- Phone: none found')
     if facts['emails']:
@@ -561,7 +581,7 @@ def write_brief(job_dir, evidence_dirs, name, url, city='', industry='', images=
         'pages': [{'url': p['url'], 'title': p.get('title', ''), 'chars': len(p.get('text', ''))} for p in pages],
         'screenshots': [rel(s) for s in screenshots],
         'phones': facts['phones'], 'emails': facts['emails'], 'addresses': facts['addresses'], 'hours': facts['hours'],
-        'social': facts['social'], 'booking': facts['booking'], 'colors': facts['colors'],
+        'country': country, 'social': facts['social'], 'booking': facts['booking'], 'colors': facts['colors'],
         'images': [{k: v for k, v in p.items() if k != 'sha256'} for p in photos],
     }
     (job_dir / 'brief.json').write_text(json.dumps(brief, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
@@ -733,7 +753,7 @@ def check(path, name=None, phone=None, email=None, image_hosts=(), final=False):
     if placeholder:
         errors.append(f'Replace placeholder text: "{placeholder.group(0)}"')
     if phone:
-        wanted = phone_digits(phone)[-10:]
+        wanted = phone_digits(phone).lstrip('0')[-10:]  # a national 0 (021…, 0812…) is dropped after the country code
         if not any(t == 'a' and a.get('href', '').lower().startswith('tel:') and phone_digits(a['href']).endswith(wanted) for t, a in tags):
             errors.append(f'Add a tap-to-call link for {phone} (tel: with its digits)')
     if email and not any(t == 'a' and a.get('href', '').lower().startswith('mailto:' + email.lower()) for t, a in tags):
@@ -806,6 +826,7 @@ def main(argv=None):
     s.add_argument('--job-dir', type=Path, required=True); s.add_argument('--evidence', type=Path, action='append', required=True)
     s.add_argument('--name', required=True); s.add_argument('--url', required=True)
     s.add_argument('--city', default=''); s.add_argument('--industry', default='')
+    s.add_argument('--country', default='', help='ISO country code such as US or ID (default: from the domain ending, else US)')
     s.add_argument('--no-images', action='store_true', help='Do not download photos from the business website')
     for command in ('check', 'inline'):
         s = sub.add_parser(command)
@@ -817,7 +838,8 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         if args.cmd == 'brief':
-            brief = write_brief(args.job_dir, args.evidence, args.name, args.url, args.city, args.industry, not args.no_images)
+            brief = write_brief(args.job_dir, args.evidence, args.name, args.url, args.city, args.industry, not args.no_images,
+                                countries.resolve(args.country, args.url))
             result = {'brief': str(Path(args.job_dir) / 'brief.md'), 'site': str(Path(args.job_dir) / 'site' / 'index.html'),
                       'pages': len(brief['pages']), 'photos': sum(1 for p in brief['images'] if p.get('file')),
                       'phones': [p['display'] for p in brief['phones'][:3]], 'emails': [e['email'] for e in brief['emails'][:3]]}

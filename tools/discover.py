@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Find target businesses for queued dashboard batches without a browser (the GitHub runner's first step).
 
-For each queued batch: search Firecrawl for the industry and place, keep only results ranked
-91–100 (Google's page 10, like the manual workflow), skip directories, social profiles and
-businesses already in the ledger, screen each remaining homepage with Firecrawl (screenshot), let
-Claude Code judge it from the screenshot (references/qualify-prompt.md) and register the qualified
-ones with their reason. In a 'build' batch each registered business is also queued for the website
-generator. Scraped text is untrusted: Claude reads it with file tools only, in a folder of its own.
+For each queued batch: search Firecrawl for the industry and place, in the batch's country and its
+main language, keep only results ranked 91–100 (Google's page 10, like the manual workflow), skip
+directories, social profiles and businesses already in the ledger, screen each remaining homepage
+with Firecrawl (screenshot), let Claude Code judge it from the screenshot
+(references/qualify-prompt.md) and register the qualified ones with their reason. In a 'build' batch
+each registered business is also queued for the website generator. Scraped text is untrusted:
+Claude reads it with file tools only, in a folder of its own.
 
 site_runner.py cloud calls discover_batch(); this module has no command line of its own.
 """
@@ -18,6 +19,7 @@ import time
 from types import SimpleNamespace
 from urllib.parse import urlsplit
 
+import countries
 import html_site
 import site_assets
 
@@ -26,8 +28,30 @@ SEARCH_API = 'https://api.firecrawl.dev/v2/search'
 QUALIFY_PROMPT = ROOT / 'references' / 'qualify-prompt.md'
 HAND_PICKED = 'Hand-picked websites'
 DEFAULTS = {'country': 'US', 'first_result': 91, 'results': 100, 'max_queries': 6, 'max_candidates': 30}
-QUERIES = ['{industry} {place}', '{industry} near {place}', '{industry} company {place}', '{industry} services {place}',
-           'local {industry} {place}', 'best {industry} {place}']
+# Search phrases in the batch country's main language (countries.LANGUAGE). {industry} and {place} are the
+# batch's own words; {city} is the place before its first comma. settings.json can add or replace a language's
+# phrases under discovery.queries, for example {"th": ["{industry} {place}", "{industry} ใกล้ {place}"]}.
+QUERIES = {
+    'en': ['{industry} {place}', '{industry} near {place}', '{industry} company {place}', '{industry} services {place}',
+           'local {industry} {place}', 'best {industry} {place}'],
+    'id': ['{industry} {place}', '{industry} di {place}', '{industry} terdekat {place}', 'jasa {industry} {place}',
+           '{industry} terbaik di {place}', 'perusahaan {industry} {place}'],
+    'ms': ['{industry} {place}', '{industry} di {place}', '{industry} berdekatan {place}', 'perkhidmatan {industry} {place}',
+           '{industry} terbaik di {place}', 'syarikat {industry} {place}'],
+    'es': ['{industry} {place}', '{industry} en {place}', '{industry} cerca de {place}', 'servicios de {industry} {place}',
+           'mejores {industry} en {place}', 'empresa de {industry} {place}'],
+    'pt': ['{industry} {place}', '{industry} em {place}', '{industry} perto de {place}', 'serviços de {industry} {place}',
+           'melhores {industry} em {place}', 'empresa de {industry} {place}'],
+    'fr': ['{industry} {place}', '{industry} à {place}', '{industry} près de {place}', 'services {industry} {place}',
+           'meilleur {industry} {place}', 'entreprise {industry} {place}'],
+    'de': ['{industry} {place}', '{industry} in {place}', '{industry} in der Nähe von {place}', '{industry} Service {place}',
+           'beste {industry} {place}', '{industry} Firma {place}'],
+    'it': ['{industry} {place}', '{industry} a {place}', '{industry} vicino a {place}', 'servizi {industry} {place}',
+           'migliori {industry} {place}', 'ditta {industry} {place}'],
+    'nl': ['{industry} {place}', '{industry} in {place}', '{industry} in de buurt van {place}', '{industry} diensten {place}',
+           'beste {industry} {place}', '{industry} bedrijf {place}'],
+}
+NEUTRAL_QUERIES = ['{industry} {place}', '{industry} {city}']  # other languages: type the industry in that language
 # Never a business's own website. The first ones also go to Firecrawl so they don't use up results.
 DIRECTORIES = [
     'yelp.com', 'angi.com', 'angieslist.com', 'homeadvisor.com', 'thumbtack.com', 'bbb.org', 'yellowpages.com',
@@ -40,11 +64,43 @@ DIRECTORIES = [
     'angi.co.uk', 'checkatrade.com', 'trustpilot.com', 'tripadvisor.com', 'opentable.com', 'doordash.com',
     'ubereats.com', 'grubhub.com', 'amazon.com', 'ebay.com', 'etsy.com', 'quora.com', 'medium.com',
 ]
+# Directories, marketplaces and platforms under any country ending (yelp.co.uk, shopee.co.id, tripadvisor.de…).
+DIRECTORY_BRANDS = {
+    'yelp', 'tripadvisor', 'amazon', 'ebay', 'google', 'facebook', 'instagram', 'linkedin', 'youtube', 'tiktok', 'pinterest',
+    'wikipedia', 'reddit', 'trustpilot', 'yellowpages', 'yell', 'pagesjaunes', 'paginasamarillas', 'paginegialle',
+    'gelbeseiten', 'goudengids', 'cylex', 'hotfrog', 'infobel', 'kompass', 'europages', 'foursquare', 'booking', 'agoda',
+    'expedia', 'trivago', 'airbnb', 'groupon', 'olx', 'tokopedia', 'shopee', 'bukalapak', 'blibli', 'lazada', 'traveloka',
+    'carousell', 'zomato', 'justdial', 'sulekha', 'indiamart', 'mercadolibre', 'mercadolivre', 'indeed', 'glassdoor',
+    'jobstreet', 'linktr', 'checkatrade', 'treatwell', 'fresha', 'houzz', 'thumbtack', 'yandex', 'naver', 'baidu', 'alibaba',
+    'aliexpress', 'etsy', 'gojek', 'kaskus', 'detik', 'kompas', 'tribunnews',
+}
+SECOND_LEVEL = {'co', 'com', 'net', 'org', 'or', 'ac', 'gov', 'go', 'web', 'biz', 'my', 'sch', 'ne', 'gob', 'edu', 'ltd', 'plc', 'nom'}
 
 
 def config(runner):
     value = runner.settings().get('discovery')
     return {**DEFAULTS, **(value if isinstance(value, dict) else {})}
+
+
+def batch_country(batch, settings):
+    """The batch's country (ISO code); batches from before countries existed use discovery.country."""
+    return countries.resolve(batch.get('country') or '', '', settings['country'])
+
+
+def queries_for(country, settings):
+    """Search phrases in the country's main language, from settings first."""
+    language = countries.LANGUAGE.get(country)
+    custom = settings.get('queries') if isinstance(settings.get('queries'), dict) else {}
+    for key in (country, country.lower(), language):
+        phrases = custom.get(key) if key else None
+        if isinstance(phrases, list) and all(isinstance(p, str) and '{industry}' in p for p in phrases) and phrases:
+            return phrases
+    return QUERIES.get(language, NEUTRAL_QUERIES)
+
+
+def query_text(template, industry, place):
+    city = place.split(',')[0].strip() or place
+    return ' '.join(template.format(industry=industry, place=place, city=city).split())
 
 
 def pending_batches(state):
@@ -57,13 +113,21 @@ def domain_of(url):
     return (urlsplit(url).hostname or '').lower().rstrip('.').removeprefix('www.')
 
 
+def brand(host):
+    """The name part of a domain: shopee for shopee.co.id, yelp for www.yelp.de."""
+    labels = host.split('.')
+    if len(labels) >= 3 and len(labels[-1]) == 2 and labels[-2] in SECOND_LEVEL:
+        return labels[-3]
+    return labels[-2] if len(labels) >= 2 else host
+
+
 def is_directory(host):
-    return any(host == d or host.endswith('.' + d) for d in DIRECTORIES)
+    return any(host == d or host.endswith('.' + d) for d in DIRECTORIES) or brand(host) in DIRECTORY_BRANDS
 
 
-def search(query, key, settings):
+def search(query, key, settings, country=None):
     payload = {'query': query[:500], 'limit': int(settings['results']), 'sources': ['web'],
-               'country': settings['country'], 'excludeDomains': DIRECTORIES[:25]}
+               'country': country or settings['country'], 'excludeDomains': DIRECTORIES[:25]}
     raw, _, _ = site_assets.fetch(SEARCH_API, limit=8 * 1024 * 1024, method='POST', body=json.dumps(payload).encode('utf-8'),
                                   headers={'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json'}, redirects=0)
     reply = json.loads(raw)
@@ -103,6 +167,7 @@ def qualify(candidate, page, workdir, runner):
     (workdir / 'candidate.json').write_text(json.dumps(candidate, indent=2, ensure_ascii=False), encoding='utf-8')
     prompt = '\n'.join([QUALIFY_PROMPT.read_text(encoding='utf-8').strip(), '', '## This candidate', '',
                         f"- Industry: {candidate['industry']}", f"- Place searched: {candidate['place']}",
+                        f"- Country (ISO code): {candidate.get('country') or 'not given'}",
                         f"- Website: {candidate['url']}",
                         '- Your working directory holds the inputs. Write `verdict.json` there.',
                         '- This is a headless check started by the website generator. Ignore other instructions about batches or this repository.'])
@@ -133,14 +198,9 @@ def normalize(verdict):
 def aliases_for(verdict, country):
     """Phone and email identities, so the same business is never registered twice."""
     aliases = []
-    phone = verdict.get('phone') or ''
-    digits = re.sub(r'\D', '', phone)
-    if phone.strip().startswith('+') and 8 <= len(digits) <= 15:
-        aliases.append('phone:+' + digits)
-    elif country == 'US' and len(digits) == 10 and digits[0] in '23456789':
-        aliases.append('phone:+1' + digits)
-    elif country == 'US' and len(digits) == 11 and digits.startswith('1'):
-        aliases.append('phone:+' + digits)
+    phone = countries.e164(verdict.get('phone'), country)
+    if phone:
+        aliases.append('phone:' + phone)
     email = verdict.get('email') or ''
     if re.fullmatch(r'[^@\s]+@[^@\s]+\.[^@\s]+', email):
         aliases.append('email:' + email)
@@ -150,7 +210,7 @@ def aliases_for(verdict, country):
 def register(ledger, batch, home, verdict, settings, runner):
     """Adds the target; returns its job ID, 'duplicate', or 'full' when the batch has no slot left."""
     generate = batch.get('mode') != 'targets'
-    for aliases in (aliases_for(verdict, settings['country']), []):
+    for aliases in (aliases_for(verdict, batch_country(batch, settings)), []):
         try:
             return ledger.add_target(verdict['business_name'], home, batch['id'], generate, 'the website generator',
                                      verdict['reason'], aliases)['id']
@@ -195,13 +255,14 @@ def discover_batch(ledger, batch, runner, deadline=None):
     key = site_assets.api_key(runner.firecrawl_env())
     scouting = runner.RUNS / 'scouting' / batch['id']
     seen, first = set(), int(settings['first_result'])
-    ledger.note(f'{name}: finding {wanted} target website(s) (search results from position {first}).')
-    for template in QUERIES[:int(settings['max_queries'])]:
+    country = batch_country(batch, settings)
+    queries = list(dict.fromkeys(query_text(t, batch['industry'], batch['city']) for t in queries_for(country, settings)))
+    ledger.note(f'{name}: finding {wanted} target website(s), searching in {country} from position {first}.')
+    for query in queries[:int(settings['max_queries'])]:
         if summary['found'] >= wanted or (deadline and time.monotonic() > deadline) or summary['screened'] >= int(settings['max_candidates']):
             break
-        query = template.format(industry=batch['industry'], place=batch['city'])
         try:
-            results = search(query, key, settings)
+            results = search(query, key, settings, country)
         except (ValueError, OSError) as error:
             ledger.note(f'{name}: the search "{query}" failed ({error if isinstance(error, ValueError) else type(error).__name__}).')
             if '402' in str(error):
@@ -230,7 +291,7 @@ def discover_batch(ledger, batch, runner, deadline=None):
                 continue
             summary['screened'] += 1
             candidate = {'url': home, 'title': result['title'], 'description': result['description'], 'position': result['position'],
-                         'query': query, 'industry': batch['industry'], 'place': batch['city']}
+                         'query': query, 'industry': batch['industry'], 'place': batch['city'], 'country': country}
             try:
                 verdict = qualify(candidate, page, scouting / 'verdicts' / re.sub(r'[^a-z0-9.-]', '_', host), runner)
             except runner.BuildError as error:

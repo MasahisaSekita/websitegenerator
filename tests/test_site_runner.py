@@ -186,6 +186,9 @@ class SiteRunnerTests(unittest.TestCase):
         prepared = site_runner.prepare(self.ledger, self.job(job_id), 'builder-1')
         self.assertEqual((prepared['pages'], prepared['photos']), (1, 2))
         self.assertEqual(self.job(job_id)['stage'], 'building')
+        # A hand-picked .example website names no country, so the brief uses discovery.country.
+        brief = (self.root / 'runs' / job_id / 'brief.md').read_text(encoding='utf-8')
+        self.assertIn('- Country (ISO code): US; its phone numbers start with +1', brief)
         page = self.root / 'runs' / job_id / 'site' / 'index.html'
         page.write_text(fixtures.GOOD_PAGE.replace('tel:+16175550142', 'tel:+16175550000'), encoding='utf-8')
         result = site_runner.finish(self.ledger, self.job(job_id), 'builder-1', upload=False)
@@ -224,9 +227,10 @@ class SiteRunnerTests(unittest.TestCase):
 
     # -- Finding targets and the GitHub run ---------------------------------------------------
 
-    def search_results(self, query, key, settings):
+    def search_results(self, query, key, settings, country=None):
         """100 results like Firecrawl's: only positions 91-100 may be used."""
         self.searches.append(query)
+        self.search_countries.append(country)
         results = [{'position': n, 'url': f'https://early{n}.example/', 'title': '', 'description': ''} for n in range(1, 91)]
         results += [{'position': 91, 'url': 'https://www.yelp.com/biz/some-electrician', 'title': 'Yelp', 'description': ''},
                     {'position': 92, 'url': 'https://known.example/', 'title': 'Known', 'description': ''},
@@ -244,7 +248,7 @@ class SiteRunnerTests(unittest.TestCase):
         return site_runner.html_site.load_pages([cache_dir])[0]
 
     def discovery(self):
-        self.searches, self.screened = [], []
+        self.searches, self.search_countries, self.screened = [], [], []
         self.fixture_evidence = fixtures.make_evidence(self.root / 'fixture')
         return [patch.object(discover, 'search', side_effect=self.search_results), patch.object(discover, 'screen', side_effect=self.fake_screen)]
 
@@ -277,6 +281,28 @@ class SiteRunnerTests(unittest.TestCase):
         self.assertEqual(len(judge), 1)
         self.assertEqual(judge[0]['args'][judge[0]['args'].index('--tools') + 1], 'Read,Write')
         self.assertEqual(self.searches, ['Electricians Boston, MA'])
+        self.assertEqual(self.search_countries, ['US'])  # a batch without a country uses discovery.country
+
+    def test_a_batch_searches_in_its_own_country_and_language(self):
+        batch = control.batch('Bengkel sepeda', 'Jakarta', 1, 'targets', 'id')
+        self.assertEqual(next(b for b in control.snapshot()['batches'] if b['id'] == batch['id'])['country'], 'ID')
+        with contextlib.ExitStack() as stack:
+            for item in self.discovery():
+                stack.enter_context(item)
+            site_runner.cloud(self.ledger, budget_minutes=5, finder=discover)
+        self.assertEqual((self.searches, self.search_countries), (['Bengkel sepeda Jakarta'], ['ID']))
+        judged = [c for c in self.calls() if '# Qualify prompt' in c['prompt']]
+        self.assertTrue(judged and all('- Country (ISO code): ID' in c['prompt'] for c in judged))
+        settings = dict(discover.DEFAULTS)
+        self.assertEqual([discover.query_text(q, 'Bengkel sepeda', 'Jakarta') for q in discover.queries_for('ID', settings)[:3]],
+                         ['Bengkel sepeda Jakarta', 'Bengkel sepeda di Jakarta', 'Bengkel sepeda terdekat Jakarta'])
+        # Languages without built-in phrases search the words as typed, unless settings add phrases.
+        self.assertEqual([discover.query_text(q, 'ช่างไฟ', 'Bangkok, Thailand') for q in discover.queries_for('TH', settings)],
+                         ['ช่างไฟ Bangkok, Thailand', 'ช่างไฟ Bangkok'])
+        settings['queries'] = {'th': ['{industry} ใกล้ {city}']}
+        self.assertEqual(discover.queries_for('TH', settings), ['{industry} ใกล้ {city}'])
+        with self.assertRaises(ValueError):
+            control.batch('Plumbers', 'Bangkok', 1, 'build', 'Thailand')
 
     def test_a_targets_only_batch_is_listed_but_not_built(self):
         batch = control.batch('Electricians', 'Boston, MA', 2, 'targets')
@@ -313,8 +339,12 @@ class SiteRunnerTests(unittest.TestCase):
         self.assertEqual(discover.aliases_for(verdict, 'US'), ['phone:+16175550142', 'email:office@brightspark.example'])
         self.assertEqual(discover.aliases_for({'phone': '+62 811 199 919', 'email': None}, 'US'), ['phone:+62811199919'])
         self.assertEqual(discover.aliases_for({'phone': '555-0142', 'email': 'not an email'}, 'US'), [])
+        self.assertEqual(discover.aliases_for({'phone': '0812-3456-7890', 'email': None}, 'ID'), ['phone:+6281234567890'])
         self.assertTrue(discover.is_directory('www.yelp.com'.removeprefix('www.')) and discover.is_directory('m.facebook.com'))
         self.assertFalse(discover.is_directory('xfacebook.com'))
+        # The same directories and marketplaces under other country endings.
+        self.assertTrue(all(discover.is_directory(h) for h in ('shopee.co.id', 'yelp.co.uk', 'tripadvisor.co.id', 'tokopedia.com')))
+        self.assertFalse(discover.is_directory('bengkelsepeda.co.id'))
         state = {'batches': [{'id': 'b2', 'status': 'queued', 'industry': 'Roofers', 'created_at': '2026-10-05T02:00:00+00:00'},
                              {'id': 'b1', 'status': 'queued', 'industry': 'Electricians', 'created_at': '2026-10-05T01:00:00+00:00'},
                              {'id': 'b3', 'status': 'running', 'industry': 'Plumbers', 'created_at': '2026-10-05T00:00:00+00:00'},

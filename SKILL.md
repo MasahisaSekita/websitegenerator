@@ -67,6 +67,8 @@ A business that is queued and has no worker is a **target**. Both dashboards lis
 - `python tools/site_runner.py doctor` lists anything missing, for example `claude auth login`.
 - Operators can also add a business by name and website (**Add website**). It goes onto the *Hand-picked websites* list, or onto a chosen batch.
 
+**Batch countries.** A dashboard batch has `country` in `state`, an ISO code such as `US` or `ID`, and its run prompt names the country. Search Google for that country, for example google.co.id for `ID`, and write phone identities with its calling code. Batches without a country use `discovery.country` in `settings.json`.
+
 **Targets-only batches.** A batch queued with "Only find targets" has `mode: targets` in `state`, and its run prompt says to find targets.
 
 - Discover and qualify exactly as for a normal batch.

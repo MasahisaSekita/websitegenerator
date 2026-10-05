@@ -119,9 +119,16 @@ Target finding there is `tools/discover.py`, with these settings under `discover
 | `results` | Results requested per search (Firecrawl's maximum is 100; 2 credits per 10) |
 | `max_queries` | Query variants tried per batch |
 | `max_candidates` | Websites screened per batch at most |
-| `country` | Search country, and the country assumed for phone numbers without a + prefix |
+| `country` | Default country (ISO code) for batches that don't name one, and for hand-picked websites whose domain ending names no country |
+| `queries` | Optional search phrases per language or country code, replacing the built-in ones, e.g. `{"th": ["{industry} {place}", "{industry} ใกล้ {place}"]}`. `{city}` is the place before its first comma |
 
 Directories, social sites and businesses already in the ledger are skipped before anything is scraped.
+
+**Countries.** Each dashboard batch names its country (`country` in `state`, an ISO code such as `US` or `ID`).
+- **Search:** it runs in that country, with phrases in its main language. English, Indonesian, Malay, Spanish, Portuguese, French, German, Italian and Dutch are built in. Elsewhere it searches the industry and place as typed, so type the industry in the local language, or add phrases under `queries`.
+- **Phone numbers:** they become international identities with the country's calling code (`tools/countries.py`), and the brief gives the page writer each number's tap-to-call form.
+- **Directories:** directories and marketplaces are skipped under any country ending, such as yelp.co.uk or shopee.co.id.
+- **Without a country:** hand-picked websites, and batches from before countries existed, use their domain ending (`.co.id` is Indonesia), else `country`.
 
 ## Legacy template mode
 

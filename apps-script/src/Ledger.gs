@@ -214,6 +214,12 @@ function batchMode_(tx, batchId) {
   return row && BATCH_MODES_.indexOf(row.value) >= 0 ? row.value : 'build';
 }
 
+/** The batch's country as an ISO code (US, ID…); '' for batches from before countries, which use the default. */
+function batchCountry_(tx, batchId) {
+  const row = tx.table('config').find(item => item.key === 'batch_country:' + batchId);
+  return row && /^[A-Z]{2}$/.test(row.value) ? row.value : '';
+}
+
 /** The website generator's last heartbeat (tools/site_runner.py), or null. */
 function generatorStatus_() {
   try {
@@ -227,7 +233,7 @@ function generatorStatus_() {
 function snapshot_(tx) {
   const jobs = tx.table('jobs').rows;
   return {
-    batches: tx.table('batches').rows.map(batch => Object.assign({}, batch, batchProgress_(batch, jobs), { mode: batchMode_(tx, batch.id) })),
+    batches: tx.table('batches').rows.map(batch => Object.assign({}, batch, batchProgress_(batch, jobs), { mode: batchMode_(tx, batch.id), country: batchCountry_(tx, batch.id) })),
     jobs: jobs.map(job => {
       try {
         return Object.assign({}, job, { data: parseJobData_(job) });
@@ -246,7 +252,7 @@ function snapshot_(tx) {
 // ---------------------------------------------------------------------------
 // Batches
 
-function createBatch_(industry, city, requestedCount, mode) {
+function createBatch_(industry, city, requestedCount, mode, country) {
   if (requestedCount === undefined || requestedCount === null) requestedCount = 5;
   if (mode === undefined || mode === null || mode === '') mode = 'build';
   if (typeof industry !== 'string' || typeof city !== 'string' || !industry.trim() || !city.trim()) throw new LedgerError_('Industry and city are required');
@@ -255,16 +261,20 @@ function createBatch_(industry, city, requestedCount, mode) {
     throw new LedgerError_('Website count must be a whole number from 1 to 100');
   }
   if (BATCH_MODES_.indexOf(mode) < 0) throw new LedgerError_('Batch mode must be build or targets');
+  country = typeof country === 'string' ? country.trim().toUpperCase() : '';
+  if (country && !/^[A-Z]{2}$/.test(country)) throw new LedgerError_('Country must be a two-letter code such as US or ID');
+  const place = city.trim() + (country ? ` (${country})` : '');
   return writeLedger_(tx => {
     const id = ident_('batch');
     tx.table('batches').insert({ id, industry: industry.trim(), city: city.trim(), status: 'queued', created_at: nowIso_(), requested_count: requestedCount });
+    if (country) tx.table('config').insert({ key: 'batch_country:' + id, value: country });
     if (mode === 'targets') {
       tx.table('config').insert({ key: 'batch_mode:' + id, value: mode });
-      tx.event(null, `Batch queued: find ${requestedCount} target websites for ${industry.trim()} in ${city.trim()}. Waiting for the coordinator; press Generate on the targets you want built.`);
+      tx.event(null, `Batch queued: find ${requestedCount} target websites for ${industry.trim()} in ${place}. Waiting for the coordinator; press Generate on the targets you want built.`);
     } else {
-      tx.event(null, `Batch queued: ${requestedCount} websites for ${industry.trim()} in ${city.trim()}. Waiting for the coordinator.`);
+      tx.event(null, `Batch queued: ${requestedCount} websites for ${industry.trim()} in ${place}. Waiting for the coordinator.`);
     }
-    return { id, status: 'queued', requested_count: requestedCount, mode };
+    return { id, status: 'queued', requested_count: requestedCount, mode, country };
   });
 }
 

@@ -634,6 +634,19 @@ describe('Generate buttons, target lists and the website generator', () => {
     assert.throws(() => gas.as('', 'requestWebsite', job.id, ''), /ACCESS_DENIED/);
   });
 
+  test('a batch keeps its country, from the dashboard and from agents', () => {
+    const gas = ledger();
+    const created = gas.as(OWNER, 'queueBatch', { industry: 'Bengkel sepeda', city: 'Jakarta', requested_count: 3, country: 'id' }, '');
+    assert.equal(created.country, 'ID');
+    assert.equal(state(gas).batches[0].country, 'ID');
+    assert.match(state(gas).events[0].message, /Bengkel sepeda in Jakarta \(ID\)/);
+    gas.call('runCommand_', 'batch', { industry: 'Plumbers', city: 'Madrid', count: 2, country: 'ES' });
+    assert.equal(state(gas).batches[1].country, 'ES');
+    assert.equal(batch(gas, 'Roofers', 'Boulder'), state(gas).batches[2].id);
+    assert.equal(state(gas).batches[2].country, '', 'no country: discovery.country applies');
+    assert.throws(() => gas.call('createBatch_', 'Roofers', 'Denver', 3, 'build', 'Indonesia'), /two-letter code/);
+  });
+
   test('a targets-only batch keeps its mode and the agent API accepts the new commands', () => {
     const gas = ledger();
     const created = gas.as(OWNER, 'queueBatch', { industry: 'Roofers', city: 'Denver, CO', requested_count: 3, mode: 'targets' }, '');
