@@ -433,9 +433,10 @@ dialog::backdrop { background: var(--overlay); -webkit-backdrop-filter: blur(2px
 
 .field { display: grid; gap: 6px; }
 .field-label { color: var(--text-2); font-size: 12.5px; font-weight: 500; }
-.field input { width: 100%; height: 40px; padding: 0 12px; border: 1px solid var(--line-strong); border-radius: 10px; background: var(--surface); outline: none; transition: border-color .15s, box-shadow .15s; }
+/* Text boxes only: the radio buttons in the New batch choices sit inside a .field too. */
+.field input:where(:not([type="radio"], [type="checkbox"])) { width: 100%; height: 40px; padding: 0 12px; border: 1px solid var(--line-strong); border-radius: 10px; background: var(--surface); outline: none; transition: border-color .15s, box-shadow .15s; }
 .field input::placeholder { color: var(--text-3); }
-.field input:focus { border-color: var(--focus); box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus) 20%, transparent); }
+.field input:where(:not([type="radio"], [type="checkbox"])):focus { border-color: var(--focus); box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus) 20%, transparent); }
 .field input[aria-invalid="true"] { border-color: var(--attention-solid); }
 .field-hint { color: var(--text-3); font-size: 12px; }
 .count-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
