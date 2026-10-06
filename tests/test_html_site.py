@@ -119,7 +119,8 @@ class HtmlSiteTests(unittest.TestCase):
         pages = [{'url': 'https://bengkelmaju.co.id/', 'screenshot': None, 'evidence': self.evidence, 'data': {
             'html': '<a href="https://wa.me/6281234567890">WhatsApp</a>',
             'markdown': 'Bengkel Maju\n\nAlamat: Jl. Kemang Raya No. 12, Jakarta Selatan 12730\n\nTelepon (021) 7190 1234\n\n'
-                        'Senin - Jumat 08.00 - 17.00\n\nHauptstraße 5, 10115 Berlin\n\nCalle Mayor 5, Madrid'}}]
+                        'Senin - Jumat 08.00 - 17.00\n\nHauptstraße 5, 10115 Berlin\n\nCalle Mayor 5, Madrid\n\n'
+                        'Sepeda listrik Rp 18.450.000, diskon jadi 15.000.000'}}]
         facts = html_site.extract(pages, 'https://bengkelmaju.co.id/', 'ID')
         self.assertEqual([p['display'] for p in facts['phones']], ['(021) 7190 1234'])
         addresses = [a['text'] for a in facts['addresses']]

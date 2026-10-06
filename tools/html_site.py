@@ -68,6 +68,8 @@ ADDRESS_INTL = re.compile(r'\b(?:Jl\.?|Jln\.?|Jalan|Gg\.?|Calle|Avenida|Avda\.?|
 ADDRESS_LABEL = re.compile(r'^#*\s*(?:address|alamat|adresse|dirección|direccion|indirizzo|endereço|endereco|adres|anschrift)\s*[:：]\s*\S.{4,140}$', re.I)
 EMAIL = re.compile(r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}')
 PHONE = re.compile(r'(?<![\w/=])(?:\+\d{1,3}[\s.-]?)?\(?\d{2,4}\)?[\s.-]?\d{3,4}[\s.-]?\d{3,4}(?![\w/])')
+AMOUNT = re.compile(r'\d{1,3}(?:[.,]\d{3})+')  # 15.000.000 or 1,250,000: a price written in thousands
+CURRENCY = re.compile(r'(?:Rp\.?|IDR|USD|RM|S\$|\$|€|£)\s*$', re.I)
 CITY_LINE = re.compile(r"^[A-Za-z][A-Za-z .'-]{1,40},\s*[A-Za-z .]{2,30}\s+[A-Z0-9]{3,6}(?:[- ]?[A-Z0-9]{3,4})?$|^[A-Za-z][A-Za-z .'-]{1,40},\s*[A-Z]{2}\b")
 # WordPress prints its default palette and gradient presets on every page; they are not the brand's colors.
 WP_PRESETS = {'#000000', '#abb8c3', '#ffffff', '#f78da7', '#cf2e2e', '#ff6900', '#fcb900', '#7bdcb5', '#00d084', '#8ed1fc', '#0693e3',
@@ -312,6 +314,8 @@ def extract(pages, site_url, country=''):
         markdown = data.get('markdown') if isinstance(data.get('markdown'), str) else ''
         plain = clean_markdown(markdown)
         for match in PHONE.finditer(plain):
+            if AMOUNT.fullmatch(match.group(0).strip()) or CURRENCY.search(plain[max(0, match.start() - 6):match.start()]):
+                continue  # Rp 15.000.000 is a price, not a phone number
             if plausible_phone(match.group(0)) and len(phone_digits(match.group(0))) >= text_digits:
                 entry = facts['phones'].setdefault(phone_digits(match.group(0)), {'display': match.group(0).strip(), 'href': '', 'sources': set()})
                 entry['sources'].add('text on ' + page['url'])
